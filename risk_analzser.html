@@ -1,0 +1,387 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Cyber Risk Analyzer</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link
+        href="https://fonts.googleapis.com/css2?family=Manrope:wght@400;500;600;700;800&family=IBM+Plex+Mono:wght@400;500;600&display=swap"
+        rel="stylesheet">
+    <link rel="stylesheet" href="risk_analyzer.css">
+
+</head>
+
+<body>
+    <div id="upload-page" class="active">
+        <div class="upload">
+            <div class="brand">
+                <div class="dot"></div><span>CYBER RISK ANALYZER</span>
+            </div>
+
+            
+
+
+            <div class="modes">
+                <button id="upload-tab" class="active" onclick="setMode('upload')">Upload your data</button>
+                <button id="demo-tab" onclick="setMode('demo')">Try demo data</button>
+            </div>
+
+            <div class="panel" id="upload-panel">
+                <div class="file-grid">
+                    <div class="drop" id="dz-assets" data-key="assets">
+                        <div class="drop-top">
+                            <div>
+                                <div class="drop-title">Assets<span class="required">*</span></div>
+                                <div class="drop-desc">Servers, databases, apps — what you have and what it's worth.
+                                </div>
+                            </div>
+                        </div>
+                        <div class="drop-status" id="status-assets">No file selected</div>
+                        <div class="drop-actions">
+                            <button class="file-btn" type="button"
+                                onclick="document.getElementById('file-assets').click()">Choose file</button>
+                            <button class="template-btn" type="button" onclick="downloadTemplate('assets')">Download
+                                template</button>
+                        </div>
+                        <input type="file" id="file-assets" accept=".csv">
+                    </div>
+
+                    <div class="drop" id="dz-vulnerabilities" data-key="vulnerabilities">
+                        <div class="drop-top">
+                            <div>
+                                <div class="drop-title">Vulnerabilities<span class="required">*</span></div>
+                                <div class="drop-desc">Known weaknesses affecting those assets.</div>
+                            </div>
+                        </div>
+                        <div class="drop-status" id="status-vulnerabilities">No file selected</div>
+                        <div class="drop-actions">
+                            <button class="file-btn" type="button"
+                                onclick="document.getElementById('file-vulnerabilities').click()">Choose file</button>
+                            <button class="template-btn" type="button"
+                                onclick="downloadTemplate('vulnerabilities')">Download template</button>
+                        </div>
+                        <input type="file" id="file-vulnerabilities" accept=".csv">
+                    </div>
+
+                    <div class="drop" id="dz-controls" data-key="controls">
+                        <div class="drop-top">
+                            <div>
+                                <div class="drop-title">Security controls<span class="optional">optional</span></div>
+                                <div class="drop-desc">Protections already in place, like MFA or backups.</div>
+                            </div>
+                        </div>
+                        <div class="drop-status" id="status-controls">No file selected</div>
+                        <div class="drop-actions">
+                            <button class="file-btn" type="button"
+                                onclick="document.getElementById('file-controls').click()">Choose file</button>
+                            <button class="template-btn" type="button" onclick="downloadTemplate('controls')">Download
+                                template</button>
+                        </div>
+                        <input type="file" id="file-controls" accept=".csv">
+                    </div>
+
+                    <div class="drop" id="dz-incidents" data-key="incidents">
+                        <div class="drop-top">
+                            <div>
+                                <div class="drop-title">Incident history<span class="optional">optional</span></div>
+                                <div class="drop-desc">Past incidents — type, frequency and loss.</div>
+                            </div>
+                        </div>
+                        <div class="drop-status" id="status-incidents">No file selected</div>
+                        <div class="drop-actions">
+                            <button class="file-btn" type="button"
+                                onclick="document.getElementById('file-incidents').click()">Choose file</button>
+                            <button class="template-btn" type="button" onclick="downloadTemplate('incidents')">Download
+                                template</button>
+                        </div>
+                        <input type="file" id="file-incidents" accept=".csv">
+                    </div>
+                </div>
+
+            </div>
+
+
+            <div class="panel" id="demo" style="display:none;">
+                <div class="demo">
+                    <h3>Sample organization dataset</h3>
+                    <p>A pre-built dataset so you can see the full dashboard right away — no files needed.</p>
+                    <div class="demo-stats">
+                        <div class="demo-stat"><b id="demo-assets-count">10</b><span>Assets</span></div>
+                        <div class="demo-stat"><b id="demo-vulns-count">14</b><span>Vulnerabilities</span></div>
+                        <div class="demo-stat"><b id="demo-controls-count">9</b><span>Controls</span></div>
+                        <div class="demo-stat"><b id="demo-incidents-count">9</b><span>Incidents</span></div>
+                    </div>
+                </div>
+            </div>
+
+            <div class="analyze">
+                <button class="analyze" id="analyze" disabled onclick="startAnalysis()">Analyze risk</button>
+                <span class="analyze-note" id="analyze-note">Add assets and vulnerabilities to continue</span>
+            </div>
+
+            <div class="error" id="error"></div>
+        </div>
+    </div>
+
+    <div id="process">
+        <div class="process-box">
+            <h3>Analyzing your data</h3>
+            <div class="process-steps" id="process-steps">
+                <div class="process-step" data-i="0">
+                    <div class="mark"></div><span>Validating uploaded files</span>
+                </div>
+                <div class="process-step" data-i="1">
+                    <div class="mark"></div><span>Mapping vulnerabilities to assets</span>
+                </div>
+                <div class="process-step" data-i="2">
+                    <div class="mark"></div><span>Evaluating existing controls</span>
+                </div>
+                <div class="process-step" data-i="3">
+                    <div class="mark"></div><span>Calculating risk scores</span>
+                </div>
+                <div class="process-step" data-i="4">
+                    <div class="mark"></div><span>Estimating financial exposure</span>
+                </div>
+                <div class="process-step" data-i="5">
+                    <div class="mark"></div><span>Building recommendations</span>
+                </div>
+            </div>
+            <div class="process-track">
+                <div class="process-bar" id="process-bar"></div>
+            </div>
+        </div>
+    </div>
+
+
+    <div id="dashboard-page">
+        <div class="dashboard">
+            <div class="sidebar">
+                <div class="side-brand">
+                    <div class="dot"></div><span>RISK ANALYZER</span>
+                </div>
+                <div class="side-nav">
+                    <button class="nav-link active" data-sec="overview" onclick="showSection('overview')"><span
+                            class="icon">◇</span>Overview</button>
+                    <button class="nav-link" data-sec="assets" onclick="showSection('assets')"><span
+                            class="icon">▤</span>Assets</button>
+                    <button class="nav-link" data-sec="vulns" onclick="showSection('vulns')"><span
+                            class="icon">△</span>Vulnerabilities</button>
+                    <button class="nav-link" data-sec="threats" onclick="showSection('threats')"><span
+                            class="icon">◎</span>Threats</button>
+                    <button class="nav-link" data-sec="financial" onclick="showSection('financial')"><span
+                            class="icon">₹</span>Financial risk</button>
+                    <div class="nav-sep"></div>
+                    <button class="nav-link" data-sec="whatif" onclick="showSection('whatif')"><span
+                            class="icon">↝</span>What-if simulator</button>
+                    <button class="nav-link" data-sec="optimizer" onclick="showSection('optimizer')"><span
+                            class="icon">✓</span>Investment optimizer</button>
+                    <button class="nav-link" data-sec="recs" onclick="showSection('recs')"><span
+                            class="icon">★</span>Recommendations</button>
+                    <div class="nav-sep"></div>
+                    <button class="nav-link" data-sec="report" onclick="showSection('report')"><span
+                            class="icon">▧</span>Report</button>
+                </div>
+                <div class="side-reset"><button onclick="resetApp()">Start a new analysis</button></div>
+            </div>
+
+            <div class="main">
+
+
+                <div class="page active" id="sec-overview">
+                    <div class="page-head">
+                        <div>
+                            <h2>Overview</h2>
+                            <p class="sub">How exposed the organization is right now.</p>
+                        </div>
+                    </div>
+                    <div class="grid grid4" id="overview-stats"></div>
+                    <div class="card" style="margin-top:16px;">
+                        <div class="title">Top risks by expected annual loss</div>
+                        <table>
+                            <thead>
+                                <tr>
+                                    <th>Asset</th>
+                                    <th>Risk score</th>
+                                    <th>Expected annual loss</th>
+                                    <th></th>
+                                </tr>
+                            </thead>
+                            <tbody id="top-risks"></tbody>
+                        </table>
+                    </div>
+                </div>
+
+
+                <div class="page" id="sec-assets">
+                    <div class="page-head">
+                        <div>
+                            <h2>Assets</h2>
+                            <p class="sub">Everything in scope, ranked by modeled risk.</p>
+                        </div>
+                    </div>
+                    <div class="card">
+                        <table>
+                            <thead>
+                                <tr>
+                                    <th>Asset</th>
+                                    <th>Type</th>
+                                    <th>Department</th>
+                                    <th>Criticality</th>
+                                    <th>Risk score</th>
+                                    <th>Level</th>
+                                </tr>
+                            </thead>
+                            <tbody id="asset-table"></tbody>
+                        </table>
+                    </div>
+                    <div class="asset-detail card" id="asset-detail">
+                        <button class="back" onclick="closeAssetDetail()">← back to list</button>
+                        <div id="asset-detail-body"></div>
+                    </div>
+                </div>
+
+
+                <div class="page" id="sec-vulns">
+                    <div class="page-head">
+                        <div>
+                            <h2>Vulnerabilities</h2>
+                            <p class="sub">Weaknesses found across all assets.</p>
+                        </div>
+                    </div>
+                    <div class="grid grid4" id="vuln-counts"></div>
+                    <div class="card" style="margin-top:16px;">
+                        <div class="title">Highest severity</div>
+                        <table>
+                            <thead>
+                                <tr>
+                                    <th>Vulnerability</th>
+                                    <th>Asset</th>
+                                    <th>Severity</th>
+                                    <th>Exploitability</th>
+                                    <th>Status</th>
+                                </tr>
+                            </thead>
+                            <tbody id="vuln-table"></tbody>
+                        </table>
+                    </div>
+                </div>
+
+
+                <div class="page" id="sec-threats">
+                    <div class="page-head">
+                        <div>
+                            <h2>Threats</h2>
+                            <p class="sub">Incident types most likely to cost the organization money.</p>
+                        </div>
+                    </div>
+                    <div class="card" id="threats"></div>
+                </div>
+
+
+                <div class="page" id="sec-financial">
+                    <div class="page-head">
+                        <div>
+                            <h2>Financial risk</h2>
+                            <p class="sub">Expected annual loss, modeled from likelihood × impact.</p>
+                        </div>
+                    </div>
+                    <div class="grid grid2">
+                        <div class="card">
+                            <div class="title">Risk by asset</div>
+                            <div id="financial-bars"></div>
+                        </div>
+                        <div class="card">
+                            <div class="title">Expected annual loss</div>
+                            <div class="value" id="financial-total" style="font-size:32px;">—</div>
+                            <p style="color:var(--muted);font-size:12.5px;margin-top:10px;line-height:1.5;">Sum of
+                                likelihood × potential impact across all assets. A modeled estimate, not a guarantee.
+                            </p>
+                        </div>
+                    </div>
+                </div>
+
+
+                <div class="page" id="sec-whatif">
+                    <div class="page-head">
+                        <div>
+                            <h2>What-if simulator</h2>
+                            <p class="sub">See how much expected loss drops if you add these protections.</p>
+                        </div>
+                    </div>
+                    <div class="grid grid2">
+                        <div class="card">
+                            <div class="title">Choose protections to simulate</div>
+                            <div class="check-list" id="whatif-list"></div>
+                            <div class="budget" style="margin-top:16px;">
+                                <button onclick="runWhatIf()" style="width:100%;">Simulate</button>
+                            </div>
+                        </div>
+                        <div class="card">
+                            <div class="title">Result</div>
+                            <div class="compare">
+                                <div class="compare-box"><span>CURRENT</span><b id="whatif-before">—</b></div>
+                                <div class="compare-box after"><span>AFTER</span><b id="whatif-after">—</b></div>
+                            </div>
+                            <div class="reduction"><span>Estimated risk reduction</span><b id="whatif-reduction">—</b>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+
+
+                <div class="page" id="sec-optimizer">
+                    <div class="page-head">
+                        <div>
+                            <h2>Investment optimizer</h2>
+                            <p class="sub">The best combination of protections for a given budget.</p>
+                        </div>
+                    </div>
+                    <div class="card">
+                        <div class="title">Available budget</div>
+                        <div class="budget"><input type="text" id="budget-input" value="2,000,000" class="num"><button
+                                onclick="runOptimizer()">Optimize</button></div>
+                    </div>
+                    <div class="card" style="margin-top:16px;">
+                        <div class="title">Recommended plan</div>
+                        <div id="plan">
+                            <div class="empty">Set a budget and click Optimize.</div>
+                        </div>
+                    </div>
+                </div>
+
+
+                <div class="page" id="sec-recs">
+                    <div class="page-head">
+                        <div>
+                            <h2>Recommendations</h2>
+                            <p class="sub">What to act on first, and why.</p>
+                        </div>
+                    </div>
+                    <div id="recommendations"></div>
+                </div>
+
+
+                <div class="page" id="sec-report">
+                    <div class="page-head">
+                        <div>
+                            <h2>Report</h2>
+                            <p class="sub">A plain-text summary you can share.</p>
+                        </div>
+                    </div>
+                    <div class="card">
+                        <div class="report" id="report-text">—</div>
+                        <div class="report-actions"><button onclick="downloadReport()">Download report (.txt)</button>
+                        </div>
+                    </div>
+                </div>
+
+            </div>
+        </div>
+    </div>
+    <script src="risk_analyzer.js"></script>
+
+</body>
+
+</html>
