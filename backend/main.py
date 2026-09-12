@@ -10,6 +10,8 @@ import pandas as pd
 from services.validation import validate_all
 from services.processing import process_data
 from services.risk_engine import calculate_risk
+from services.financial_engine import calculate_financial_risk
+from services.threat_engine import analyze_threats
 
 # Load environment variables
 load_dotenv()
@@ -303,9 +305,103 @@ async def analyze_endpoint(
             content={"success": False, "detail": "Risk calculation failed unexpectedly."},
         )
 
+    # 5. Calculate modeled financial risk
+    try:
+        financial_result = calculate_financial_risk(processed_result, risk_result)
+    except Exception as exc:
+        import traceback
+        traceback.print_exc()
+        return JSONResponse(
+            status_code=500,
+            content={"success": False, "detail": "Financial calculation failed unexpectedly."},
+        )
+
+    # Merge financial metrics into asset risk profiles so assets in response have both risk and financial
+    fin_asset_map = {a["asset_id"]: a["financial"] for a in financial_result.get("assets", [])}
+    merged_assets = []
+    for a in risk_result.get("assets", []):
+        a_copy = dict(a)
+        if a["asset_id"] in fin_asset_map:
+            a_copy["financial"] = fin_asset_map[a["asset_id"]]
+        merged_assets.append(a_copy)
+
+    # 6. Calculate threat and scenario metrics
+    try:
+        threat_result = analyze_threats(processed_result, risk_result)
+    except Exception as exc:
+        import traceback
+        traceback.print_exc()
+        return JSONResponse(
+            status_code=500,
+            content={"success": False, "detail": "Threat analysis failed unexpectedly."},
+        )
+
+    response_payload = {
+        "success": True,
+        "overall_risk": risk_result.get("overall_risk"),
+        "risk_distribution": risk_result.get("risk_distribution"),
+        "top_risk_assets": risk_result.get("top_risk_assets"),
+        "assets": merged_assets,
+        "risk": risk_result,
+        "financial": financial_result,
+        "threats": threat_result,
+    }
+
     return JSONResponse(
         status_code=200,
-        content=risk_result,
+        content=response_payload,
+    )
+
+
+@app.post("/api/threats")
+async def threats_endpoint(
+    assets: Optional[UploadFile] = File(None),
+    vulnerabilities: Optional[UploadFile] = File(None),
+    controls: Optional[UploadFile] = File(None),
+    incidents: Optional[UploadFile] = File(None),
+):
+    """
+    Standalone endpoint to calculate threat and scenario metrics.
+    """
+    parsed_dfs, parse_errors = await _parse_all_files(assets, vulnerabilities, controls, incidents)
+    if parse_errors:
+        return JSONResponse(
+            status_code=400,
+            content={"success": False, "errors": parse_errors},
+        )
+
+    validation_result = validate_all(
+        assets_df=parsed_dfs["assets"],
+        vulnerabilities_df=parsed_dfs["vulnerabilities"],
+        controls_df=parsed_dfs["controls"],
+        incidents_df=parsed_dfs["incidents"],
+    )
+    if not validation_result["valid"]:
+        return JSONResponse(
+            status_code=400,
+            content={"success": False, "validation": validation_result},
+        )
+
+    try:
+        processed_result = process_data(
+            assets_df=parsed_dfs["assets"],
+            vulnerabilities_df=parsed_dfs["vulnerabilities"],
+            controls_df=parsed_dfs["controls"],
+            incidents_df=parsed_dfs["incidents"],
+        )
+        risk_result = calculate_risk(processed_result)
+        threat_result = analyze_threats(processed_result, risk_result)
+    except Exception as exc:
+        import traceback
+        traceback.print_exc()
+        return JSONResponse(
+            status_code=500,
+            content={"success": False, "detail": "Threat analysis failed unexpectedly."},
+        )
+
+    return JSONResponse(
+        status_code=200,
+        content={"success": True, "threats": threat_result},
     )
 
 

@@ -380,9 +380,22 @@ async function sendBackendAnalyze(src) {
             console.log('Backend risk analysis successful:', result);
             console.log('Overall modeled risk:', result.overall_risk);
             console.log('Risk distribution:', result.risk_distribution);
+            if (result.financial) {
+                console.log('Backend financial analysis successful:', result.financial);
+                console.log('Financial summary:', result.financial.financial_summary);
+                console.log('Top historical loss assets:', result.financial.top_historical_loss_assets);
+                console.log('Top risk exposure assets:', result.financial.top_risk_exposure_assets);
+            }
+            if (result.threats) {
+                console.log('Threat analysis received:', result.threats);
+                console.log('Threat scenario count:', result.threats.scenario_count);
+                if (result.threats.scenarios && result.threats.scenarios.length > 0) {
+                    console.log('Top threat scenario:', result.threats.scenarios[0]);
+                }
+            }
             // Spot check A001
             const a001 = (result.assets || []).find(a => a.asset_id === 'A001');
-            if (a001) console.log('A001 modeled risk profile:', a001);
+            if (a001) console.log('A001 modeled risk & financial profile:', a001);
         } else {
             console.warn('Backend analysis failed:', result);
         }
