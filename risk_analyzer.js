@@ -84,8 +84,11 @@ function setMode(mode) {
     });
 });
 
+let RAW_FILES = { assets: null, vulnerabilities: null, controls: null, incidents: null };
+
 function handleFile(key, file) {
     if (!file) return;
+    RAW_FILES[key] = file;
     const reader = new FileReader();
     reader.onload = () => {
         try {
@@ -272,6 +275,99 @@ function totalLossWithExtraProtection(assets, extraEffectiveness) {
 }
 
 
+function objectsToCSVString(arr, headers) {
+    if (!arr) return headers.join(',') + '\n';
+    const lines = [headers.join(',')];
+    arr.forEach(obj => {
+        const row = headers.map(h => {
+            let val = obj[h] !== undefined && obj[h] !== null ? String(obj[h]) : '';
+            if (val.includes(',') || val.includes('"') || val.includes('\n')) {
+                val = '"' + val.replace(/"/g, '""') + '"';
+            }
+            return val;
+        });
+        lines.push(row.join(','));
+    });
+    return lines.join('\n');
+}
+
+const CSV_HEADERS = {
+    assets: ['asset_id', 'asset_name', 'asset_type', 'department', 'criticality', 'business_value', 'internet_exposed', 'data_sensitivity'],
+    vulnerabilities: ['vulnerability_id', 'asset_id', 'vulnerability_name', 'severity', 'exploitability', 'status', 'discovered_date'],
+    controls: ['control_id', 'control_name', 'asset_id', 'effectiveness', 'implementation_status', 'annual_cost'],
+    incidents: ['incident_id', 'asset_id', 'incident_type', 'frequency_per_year', 'average_loss', 'downtime_hours']
+};
+
+async function sendBackendValidation(src) {
+    try {
+        const formData = new FormData();
+        const keys = ['assets', 'vulnerabilities', 'controls', 'incidents'];
+
+        keys.forEach(key => {
+            if (MODE === 'upload' && RAW_FILES[key]) {
+                formData.append(key, RAW_FILES[key]);
+            } else {
+                const arr = src[key] || [];
+                const csvStr = objectsToCSVString(arr, CSV_HEADERS[key]);
+                const blob = new Blob([csvStr], { type: 'text/csv' });
+                const file = new File([blob], key + '.csv', { type: 'text/csv' });
+                formData.append(key, file);
+            }
+        });
+
+        const response = await fetch('http://localhost:8000/api/validate', {
+            method: 'POST',
+            body: formData
+        });
+        const result = await response.json();
+        if (response.ok && result.valid) {
+            console.log('Backend validation successful:', result);
+        } else {
+            console.warn('Backend validation errors:', result);
+        }
+    } catch (err) {
+        console.warn('Backend validation call failed (server offline or network error):', err);
+    }
+}
+
+function _buildFormData(src) {
+    const formData = new FormData();
+    const keys = ['assets', 'vulnerabilities', 'controls', 'incidents'];
+    keys.forEach(key => {
+        if (MODE === 'upload' && RAW_FILES[key]) {
+            formData.append(key, RAW_FILES[key]);
+        } else {
+            const arr = src[key] || [];
+            const csvStr = objectsToCSVString(arr, CSV_HEADERS[key]);
+            const blob = new Blob([csvStr], { type: 'text/csv' });
+            const file = new File([blob], key + '.csv', { type: 'text/csv' });
+            formData.append(key, file);
+        }
+    });
+    return formData;
+}
+
+async function sendBackendProcessing(src) {
+    try {
+        const formData = _buildFormData(src);
+        const response = await fetch('http://localhost:8000/api/process', {
+            method: 'POST',
+            body: formData
+        });
+        const result = await response.json();
+        if (response.ok && result.success) {
+            console.log('Backend data processing successful:', result.summary);
+            // Log A001 profile as a spot-check
+            const a001 = (result.assets || []).find(a => a.asset_id === 'A001');
+            if (a001) console.log('A001 profile:', a001);
+        } else {
+            console.warn('Backend processing failed:', result);
+        }
+    } catch (err) {
+        console.warn('Backend processing call failed (server offline or network error):', err);
+    }
+}
+
 function startAnalysis() {
     hideError();
     let src;
@@ -282,6 +378,10 @@ function startAnalysis() {
         if (!RAW.vulnerabilities || !RAW.vulnerabilities.length) { showError('Please add a vulnerabilities file before analyzing.'); return; }
         src = { assets: RAW.assets, vulnerabilities: RAW.vulnerabilities, controls: RAW.controls || [], incidents: RAW.incidents || [] };
     }
+
+    // Trigger backend validation and processing asynchronously without blocking UI
+    sendBackendValidation(src);
+    sendBackendProcessing(src);
 
     const overlay = document.getElementById('process');
     overlay.classList.add('show');
@@ -308,6 +408,7 @@ function startAnalysis() {
 function resetApp() {
     DATA = null;
     RAW = { assets: null, vulnerabilities: null, controls: null, incidents: null };
+    RAW_FILES = { assets: null, vulnerabilities: null, controls: null, incidents: null };
     ['assets', 'vulnerabilities', 'controls', 'incidents'].forEach(k => {
         document.getElementById('status-' + k).textContent = 'No file selected';
         document.getElementById('status-' + k).classList.remove('ok');

@@ -1,10 +1,16 @@
+import io
 import os
-from fastapi import FastAPI, HTTPException, Request
+from typing import Dict, Any, Optional, Tuple
+from fastapi import FastAPI, HTTPException, Request, File, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from dotenv import load_dotenv
+import pandas as pd
 
-# Load environment variables from .env if present
+from services.validation import validate_all
+from services.processing import process_data
+
+# Load environment variables
 load_dotenv()
 
 app = FastAPI(
@@ -71,15 +77,169 @@ async def health_check():
     }
 
 
-# ------------------------------------------------------------------
-# Future Endpoint Stubs (Phase 2+)
-# ------------------------------------------------------------------
-# POST /api/validate        -> Validation of uploaded datasets
-# POST /api/analyze         -> Comprehensive risk analysis calculation
-# POST /api/simulate        -> What-if scenario simulations
-# POST /api/optimize        -> Investment/control optimizer
-# POST /api/recommendations -> Remediation action plan generator
-# ------------------------------------------------------------------
+MAX_FILE_SIZE = 10 * 1024 * 1024  # 10 MB
+
+
+async def _parse_upload_file(file: Optional[UploadFile], file_key: str) -> Tuple[Optional[pd.DataFrame], Optional[str]]:
+    """
+    Safely validate and parse UploadFile into a pandas DataFrame.
+    Returns (df, error_message).
+    """
+    if file is None or not file.filename:
+        return None, f"Missing required file: {file_key}.csv"
+
+    filename = file.filename.lower()
+    if not filename.endswith(".csv"):
+        return None, f"Unsupported file type for {file_key}. Only .csv files are allowed."
+
+    content = await file.read()
+    if len(content) > MAX_FILE_SIZE:
+        return None, f"File {file.filename} exceeds maximum size limit of 10MB."
+
+    if len(content.strip()) == 0:
+        return None, f"{file_key}.csv is empty."
+
+    # Attempt parsing with multiple encodings
+    for encoding in ["utf-8", "utf-8-sig", "latin-1"]:
+        try:
+            df = pd.read_csv(io.BytesIO(content), encoding=encoding)
+            return df, None
+        except Exception:
+            continue
+
+    return None, f"Malformed CSV in {file_key}.csv."
+
+
+@app.post("/api/validate")
+async def validate_endpoint(
+    assets: Optional[UploadFile] = File(None),
+    vulnerabilities: Optional[UploadFile] = File(None),
+    controls: Optional[UploadFile] = File(None),
+    incidents: Optional[UploadFile] = File(None)
+):
+    """
+    Endpoint to receive and validate assets, vulnerabilities, controls, and incidents CSV files.
+    """
+    files_map = {
+        "assets": assets,
+        "vulnerabilities": vulnerabilities,
+        "controls": controls,
+        "incidents": incidents
+    }
+
+    parsed_dfs: Dict[str, pd.DataFrame] = {}
+    missing_or_error_messages = []
+
+    for key, file_obj in files_map.items():
+        df, err = await _parse_upload_file(file_obj, key)
+        if err:
+            missing_or_error_messages.append(err)
+        else:
+            parsed_dfs[key] = df
+
+    if missing_or_error_messages:
+        return JSONResponse(
+            status_code=400,
+            content={
+                "valid": False,
+                "errors": missing_or_error_messages
+            }
+        )
+
+    # Perform detailed domain validation
+    validation_result = validate_all(
+        assets_df=parsed_dfs["assets"],
+        vulnerabilities_df=parsed_dfs["vulnerabilities"],
+        controls_df=parsed_dfs["controls"],
+        incidents_df=parsed_dfs["incidents"]
+    )
+
+    status_code = 200 if validation_result["valid"] else 400
+    return JSONResponse(status_code=status_code, content=validation_result)
+
+
+async def _parse_all_files(
+    assets: Optional[UploadFile],
+    vulnerabilities: Optional[UploadFile],
+    controls: Optional[UploadFile],
+    incidents: Optional[UploadFile],
+):
+    """
+    Shared helper: parse all four UploadFile objects into DataFrames.
+    Returns (parsed_dfs dict, error_list).
+    """
+    files_map = {
+        "assets": assets,
+        "vulnerabilities": vulnerabilities,
+        "controls": controls,
+        "incidents": incidents,
+    }
+    parsed_dfs: Dict[str, pd.DataFrame] = {}
+    errors = []
+    for key, file_obj in files_map.items():
+        df, err = await _parse_upload_file(file_obj, key)
+        if err:
+            errors.append(err)
+        else:
+            parsed_dfs[key] = df
+    return parsed_dfs, errors
+
+
+@app.post("/api/process")
+async def process_endpoint(
+    assets: Optional[UploadFile] = File(None),
+    vulnerabilities: Optional[UploadFile] = File(None),
+    controls: Optional[UploadFile] = File(None),
+    incidents: Optional[UploadFile] = File(None),
+):
+    """
+    Receive, validate, and process all four risk CSV files.
+    Returns a normalized, asset-centric data structure.
+    Does NOT compute risk scores or financial metrics.
+    """
+    # 1. Parse uploaded files
+    parsed_dfs, parse_errors = await _parse_all_files(assets, vulnerabilities, controls, incidents)
+    if parse_errors:
+        return JSONResponse(
+            status_code=400,
+            content={"success": False, "errors": parse_errors},
+        )
+
+    # 2. Validate (reuse existing validation service — no duplication)
+    validation_result = validate_all(
+        assets_df=parsed_dfs["assets"],
+        vulnerabilities_df=parsed_dfs["vulnerabilities"],
+        controls_df=parsed_dfs["controls"],
+        incidents_df=parsed_dfs["incidents"],
+    )
+    if not validation_result["valid"]:
+        return JSONResponse(
+            status_code=400,
+            content={"success": False, "validation": validation_result},
+        )
+
+    # 3. Process validated data
+    try:
+        result = process_data(
+            assets_df=parsed_dfs["assets"],
+            vulnerabilities_df=parsed_dfs["vulnerabilities"],
+            controls_df=parsed_dfs["controls"],
+            incidents_df=parsed_dfs["incidents"],
+        )
+    except Exception as exc:
+        # Log technical detail server-side; return generic message to client
+        import traceback
+        traceback.print_exc()
+        return JSONResponse(
+            status_code=500,
+            content={"success": False, "detail": "Data processing failed unexpectedly."},
+        )
+
+    return JSONResponse(
+        status_code=200,
+        content={"success": True, **result},
+    )
+
 
 if __name__ == "__main__":
     import uvicorn
