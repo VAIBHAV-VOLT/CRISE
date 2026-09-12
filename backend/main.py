@@ -9,6 +9,7 @@ import pandas as pd
 
 from services.validation import validate_all
 from services.processing import process_data
+from services.risk_engine import calculate_risk
 
 # Load environment variables
 load_dotenv()
@@ -238,6 +239,73 @@ async def process_endpoint(
     return JSONResponse(
         status_code=200,
         content={"success": True, **result},
+    )
+
+
+@app.post("/api/analyze")
+async def analyze_endpoint(
+    assets: Optional[UploadFile] = File(None),
+    vulnerabilities: Optional[UploadFile] = File(None),
+    controls: Optional[UploadFile] = File(None),
+    incidents: Optional[UploadFile] = File(None),
+):
+    """
+    Receive, validate, process, and calculate modeled cyber risk scores
+    for all assets and enterprise overall.
+    Pipeline:
+      POST /api/analyze -> Parse CSV -> validate_all() -> process_data() -> calculate_risk() -> JSON
+    """
+    # 1. Parse uploaded files
+    parsed_dfs, parse_errors = await _parse_all_files(assets, vulnerabilities, controls, incidents)
+    if parse_errors:
+        return JSONResponse(
+            status_code=400,
+            content={"success": False, "errors": parse_errors},
+        )
+
+    # 2. Validate (reuse existing validation service — no duplication)
+    validation_result = validate_all(
+        assets_df=parsed_dfs["assets"],
+        vulnerabilities_df=parsed_dfs["vulnerabilities"],
+        controls_df=parsed_dfs["controls"],
+        incidents_df=parsed_dfs["incidents"],
+    )
+    if not validation_result["valid"]:
+        return JSONResponse(
+            status_code=400,
+            content={"success": False, "validation": validation_result},
+        )
+
+    # 3. Process validated data
+    try:
+        processed_result = process_data(
+            assets_df=parsed_dfs["assets"],
+            vulnerabilities_df=parsed_dfs["vulnerabilities"],
+            controls_df=parsed_dfs["controls"],
+            incidents_df=parsed_dfs["incidents"],
+        )
+    except Exception as exc:
+        import traceback
+        traceback.print_exc()
+        return JSONResponse(
+            status_code=500,
+            content={"success": False, "detail": "Data processing failed unexpectedly."},
+        )
+
+    # 4. Calculate modeled risk scores
+    try:
+        risk_result = calculate_risk(processed_result)
+    except Exception as exc:
+        import traceback
+        traceback.print_exc()
+        return JSONResponse(
+            status_code=500,
+            content={"success": False, "detail": "Risk calculation failed unexpectedly."},
+        )
+
+    return JSONResponse(
+        status_code=200,
+        content=risk_result,
     )
 
 

@@ -368,6 +368,29 @@ async function sendBackendProcessing(src) {
     }
 }
 
+async function sendBackendAnalyze(src) {
+    try {
+        const formData = _buildFormData(src);
+        const response = await fetch('http://localhost:8000/api/analyze', {
+            method: 'POST',
+            body: formData
+        });
+        const result = await response.json();
+        if (response.ok && result.success) {
+            console.log('Backend risk analysis successful:', result);
+            console.log('Overall modeled risk:', result.overall_risk);
+            console.log('Risk distribution:', result.risk_distribution);
+            // Spot check A001
+            const a001 = (result.assets || []).find(a => a.asset_id === 'A001');
+            if (a001) console.log('A001 modeled risk profile:', a001);
+        } else {
+            console.warn('Backend analysis failed:', result);
+        }
+    } catch (err) {
+        console.warn('Backend analysis call failed (server offline or network error):', err);
+    }
+}
+
 function startAnalysis() {
     hideError();
     let src;
@@ -379,9 +402,10 @@ function startAnalysis() {
         src = { assets: RAW.assets, vulnerabilities: RAW.vulnerabilities, controls: RAW.controls || [], incidents: RAW.incidents || [] };
     }
 
-    // Trigger backend validation and processing asynchronously without blocking UI
+    // Trigger backend validation, processing, and risk analysis asynchronously without blocking UI
     sendBackendValidation(src);
     sendBackendProcessing(src);
+    sendBackendAnalyze(src);
 
     const overlay = document.getElementById('process');
     overlay.classList.add('show');
