@@ -2,6 +2,11 @@
 let RAW = { assets: null, vulnerabilities: null, controls: null, incidents: null };
 let MODE = 'upload';
 let DATA = null;     // computed model after analysis
+let backendAnalysis = null;
+let backendAnalysisStatus = 'idle'; // 'idle' | 'loading' | 'success' | 'error'
+let backendAnalysisError = null;
+let simulationResult = null;
+let optimizerResult = null;
 
 const IMPROVEMENTS = [
     { id: 'mfa', name: 'Multi-factor authentication', effectiveness: 0.50, cost: 300000 },
@@ -263,11 +268,35 @@ function computeModel(src) {
 }
 
 
-function totalLossWithExtraProtection(assets, extraEffectiveness) {
+/**
+ * Combine multiple effectiveness values using the diminishing-returns formula:
+ *   combined = 1 - product(1 - e_i)
+ * Example: MFA 50%, Firewall 60%, Backup 65%
+ *   combined = 1 - (0.5 * 0.4 * 0.35) = 1 - 0.07 = 0.93 (93%)
+ * Result is capped at 1.0 (100%).
+ */
+function combinedEffectiveness(effectivenessValues) {
+    if (!effectivenessValues || effectivenessValues.length === 0) return 0;
+    let residual = 1;
+    effectivenessValues.forEach(e => { residual *= (1 - Math.min(Math.max(e, 0), 1)); });
+    return Math.min(1, 1 - residual);
+}
+
+function totalLossWithExtraProtection(assets, extraEffectivenessValues) {
+    // extraEffectivenessValues is an array of effectiveness values from selected improvements
+    const extraArr = Array.isArray(extraEffectivenessValues) ? extraEffectivenessValues : [extraEffectivenessValues];
+    const extraCombined = combinedEffectiveness(extraArr.filter(e => e > 0));
     let total = 0;
     assets.forEach(a => {
-        const protection = Math.max(a.protection, extraEffectiveness);
-        const residual = 1 - protection;
+        // Combine the asset's existing protection with the extra combined effectiveness
+        // using the same diminishing-returns formula
+        const existingProtection = a.protection || 0;
+        const combined = combinedEffectiveness(
+            extraCombined > 0
+                ? [existingProtection, extraCombined]
+                : [existingProtection]
+        );
+        const residual = 1 - combined;
         const likelihood = (a.topVuln ? a.topVuln.severity / 10 : 0) * (a.topVuln ? a.topVuln.exploitability : 0) * residual;
         total += likelihood * a.potentialLoss;
     });
@@ -369,6 +398,9 @@ async function sendBackendProcessing(src) {
 }
 
 async function sendBackendAnalyze(src) {
+    backendAnalysis = null;
+    backendAnalysisStatus = 'loading';
+    backendAnalysisError = null;
     try {
         const formData = _buildFormData(src);
         const response = await fetch('http://localhost:8000/api/analyze', {
@@ -377,6 +409,8 @@ async function sendBackendAnalyze(src) {
         });
         const result = await response.json();
         if (response.ok && result.success) {
+            backendAnalysis = result;
+            backendAnalysisStatus = 'success';
             console.log('Backend risk analysis successful:', result);
             console.log('Overall modeled risk:', result.overall_risk);
             console.log('Risk distribution:', result.risk_distribution);
@@ -393,14 +427,20 @@ async function sendBackendAnalyze(src) {
                     console.log('Top threat scenario:', result.threats.scenarios[0]);
                 }
             }
-            // Spot check A001
             const a001 = (result.assets || []).find(a => a.asset_id === 'A001');
             if (a001) console.log('A001 modeled risk & financial profile:', a001);
+            return result;
         } else {
+            backendAnalysisStatus = 'error';
+            backendAnalysisError = result.detail || 'Backend analysis failed';
             console.warn('Backend analysis failed:', result);
+            return null;
         }
     } catch (err) {
+        backendAnalysisStatus = 'error';
+        backendAnalysisError = 'Backend unavailable (server offline or network error)';
         console.warn('Backend analysis call failed (server offline or network error):', err);
+        return null;
     }
 }
 
@@ -415,10 +455,15 @@ function startAnalysis() {
         src = { assets: RAW.assets, vulnerabilities: RAW.vulnerabilities, controls: RAW.controls || [], incidents: RAW.incidents || [] };
     }
 
-    // Trigger backend validation, processing, and risk analysis asynchronously without blocking UI
+    // Reset backend analysis state before starting new request
+    backendAnalysis = null;
+    backendAnalysisStatus = 'loading';
+    backendAnalysisError = null;
+
+    // Trigger backend validation, processing, and risk analysis
     sendBackendValidation(src);
     sendBackendProcessing(src);
-    sendBackendAnalyze(src);
+    const analyzePromise = sendBackendAnalyze(src);
 
     const overlay = document.getElementById('process');
     overlay.classList.add('show');
@@ -428,11 +473,12 @@ function startAnalysis() {
     bar.style.width = '0%';
 
     let i = 0;
-    const timer = setInterval(() => {
+    const timer = setInterval(async () => {
         if (i < steps.length) { steps[i].classList.add('done'); i++; }
         bar.style.width = Math.round((i / steps.length) * 100) + '%';
         if (i >= steps.length) {
             clearInterval(timer);
+            await analyzePromise;
             setTimeout(() => {
                 DATA = computeModel(src);
                 overlay.classList.remove('show');
@@ -444,6 +490,9 @@ function startAnalysis() {
 
 function resetApp() {
     DATA = null;
+    backendAnalysis = null;
+    backendAnalysisStatus = 'idle';
+    backendAnalysisError = null;
     RAW = { assets: null, vulnerabilities: null, controls: null, incidents: null };
     RAW_FILES = { assets: null, vulnerabilities: null, controls: null, incidents: null };
     ['assets', 'vulnerabilities', 'controls', 'incidents'].forEach(k => {
@@ -475,9 +524,11 @@ function launchDashboard() {
     renderThreats();
     renderFinancial();
     renderWhatIfChecklist();
+    renderCompliance();
     renderReport();
     document.getElementById('plan').innerHTML = '<div class="empty">Set a budget and click Optimize.</div>';
 }
+
 
 function showSection(name) {
     document.querySelectorAll('.page').forEach(s => s.classList.remove('active'));
@@ -486,176 +537,702 @@ function showSection(name) {
 }
 
 function renderOverview() {
-    const level = riskLevel(DATA.overallRiskScore);
-    const stats = [
-        { label: 'Overall risk score', value: DATA.overallRiskScore.toFixed(0) + ' / 100', tag: level },
-        { label: 'Expected annual loss', value: fmtINR(DATA.totalExpectedLoss), tag: null },
-        { label: 'Assets analyzed', value: DATA.assets.length, tag: null },
-        { label: 'Critical vulnerabilities', value: DATA.criticalVulnCount, tag: null }
-    ];
-    document.getElementById('overview-stats').innerHTML = stats.map(s => `
-    <div class="card">
-      <div class="label">${s.label}</div>
-      <div class="value">${s.value}</div>
-      ${s.tag ? `<div class="tag ${levelTagClass(s.tag)}">${s.tag}</div>` : ''}
-    </div>`).join('');
+    let level, stats, top;
 
-    const top = [...DATA.assets].sort((a, b) => b.expectedLoss - a.expectedLoss).slice(0, 6);
-    document.getElementById('top-risks').innerHTML = top.map(a => `
-    <tr class="click-row" onclick="showSection('assets');openAssetDetail('${a.id}')">
-      <td><b>${a.name}</b></td>
-      <td>${a.riskScore.toFixed(0)}</td>
-      <td class="num">${fmtINR(a.expectedLoss)}</td>
-      <td><span class="tag ${levelTagClass(a.level)}">${a.level}</span></td>
-    </tr>`).join('');
+    if (backendAnalysisStatus === 'success' && backendAnalysis && backendAnalysis.overall_risk) {
+        const ov = backendAnalysis.overall_risk;
+        const fin = backendAnalysis.financial ? backendAnalysis.financial.financial_summary : {};
+        const threats = backendAnalysis.threats || {};
+
+        level = ov.level || riskLevel(ov.score);
+
+        stats = [
+            { label: 'Modeled Risk Score', value: ov.score.toFixed(0) + ' / 100', tag: level },
+            { label: 'Historical Annualized Loss', value: fmtINR(fin.historical_annualized_loss !== undefined ? fin.historical_annualized_loss : (fin.total_historical_annualized_loss || 0)), tag: null },
+            { label: 'Risk Exposure', value: fmtINR(fin.risk_based_business_exposure !== undefined ? fin.risk_based_business_exposure : (fin.total_risk_based_business_exposure || 0)), tag: null },
+            { label: 'Threat Scenarios', value: threats.status === 'ok' ? threats.scenario_count : '0', tag: null }
+        ];
+
+        document.getElementById('overview-stats').innerHTML = stats.map(s => `
+        <div class="card">
+          <div class="label">${s.label}</div>
+          <div class="value">${s.value}</div>
+          ${s.tag ? `<div class="tag ${levelTagClass(s.tag)}">${s.tag}</div>` : ''}
+        </div>`).join('');
+
+        const backendAssets = backendAnalysis.assets || [];
+        top = [...backendAssets].sort((a, b) => {
+            const lossA = a.financial ? a.financial.historical_annualized_loss : (a.risk ? a.risk.score : 0);
+            const lossB = b.financial ? b.financial.historical_annualized_loss : (a.risk ? a.risk.score : 0);
+            return lossB - lossA;
+        }).slice(0, 6);
+
+        document.getElementById('top-risks').innerHTML = top.map(a => {
+            const score = a.risk ? a.risk.score : 0;
+            const rLevel = a.risk ? a.risk.level : 'LOW';
+            const loss = a.financial ? a.financial.historical_annualized_loss : 0;
+            return `
+            <tr class="click-row" onclick="showSection('assets');openAssetDetail('${a.asset_id}')">
+              <td><b>${a.asset_name}</b></td>
+              <td>${score.toFixed(0)}</td>
+              <td class="num">${fmtINR(loss)}</td>
+              <td><span class="tag ${levelTagClass(rLevel)}">${rLevel}</span></td>
+            </tr>`;
+        }).join('');
+        return;
+    }
+
+    if (backendAnalysisStatus === 'error') {
+        stats = [
+            { label: 'Overall risk score', value: DATA ? DATA.overallRiskScore.toFixed(0) + ' / 100' : '—', tag: DATA ? riskLevel(DATA.overallRiskScore) : null },
+            { label: 'Backend Status', value: 'Offline / Error', tag: 'CRITICAL' },
+            { label: 'Assets analyzed', value: DATA ? DATA.assets.length : '0', tag: null },
+            { label: 'Critical vulnerabilities', value: DATA ? DATA.criticalVulnCount : '0', tag: null }
+        ];
+        document.getElementById('overview-stats').innerHTML = stats.map(s => `
+        <div class="card">
+          <div class="label">${s.label}</div>
+          <div class="value">${s.value}</div>
+          ${s.tag ? `<div class="tag ${levelTagClass(s.tag)}">${s.tag}</div>` : ''}
+        </div>`).join('');
+
+        if (DATA) {
+            top = [...DATA.assets].sort((a, b) => b.expectedLoss - a.expectedLoss).slice(0, 6);
+            document.getElementById('top-risks').innerHTML = top.map(a => `
+            <tr class="click-row" onclick="showSection('assets');openAssetDetail('${a.id}')">
+              <td><b>${a.name}</b></td>
+              <td>${a.riskScore.toFixed(0)}</td>
+              <td class="num">${fmtINR(a.expectedLoss)}</td>
+              <td><span class="tag ${levelTagClass(a.level)}">${a.level}</span></td>
+            </tr>`).join('');
+        }
+        return;
+    }
+
+    if (DATA) {
+        level = riskLevel(DATA.overallRiskScore);
+        stats = [
+            { label: 'Overall risk score', value: DATA.overallRiskScore.toFixed(0) + ' / 100', tag: level },
+            { label: 'Expected annual loss', value: fmtINR(DATA.totalExpectedLoss), tag: null },
+            { label: 'Assets analyzed', value: DATA.assets.length, tag: null },
+            { label: 'Critical vulnerabilities', value: DATA.criticalVulnCount, tag: null }
+        ];
+        document.getElementById('overview-stats').innerHTML = stats.map(s => `
+        <div class="card">
+          <div class="label">${s.label}</div>
+          <div class="value">${s.value}</div>
+          ${s.tag ? `<div class="tag ${levelTagClass(s.tag)}">${s.tag}</div>` : ''}
+        </div>`).join('');
+
+        top = [...DATA.assets].sort((a, b) => b.expectedLoss - a.expectedLoss).slice(0, 6);
+        document.getElementById('top-risks').innerHTML = top.map(a => `
+        <tr class="click-row" onclick="showSection('assets');openAssetDetail('${a.id}')">
+          <td><b>${a.name}</b></td>
+          <td>${a.riskScore.toFixed(0)}</td>
+          <td class="num">${fmtINR(a.expectedLoss)}</td>
+          <td><span class="tag ${levelTagClass(a.level)}">${a.level}</span></td>
+        </tr>`).join('');
+    }
 }
 
 function renderAssets() {
-    const rows = [...DATA.assets].sort((a, b) => b.riskScore - a.riskScore);
-    document.getElementById('asset-table').innerHTML = rows.map(a => `
-    <tr class="click-row" onclick="openAssetDetail('${a.id}')">
-      <td><b>${a.name}</b></td>
-      <td>${a.type}</td>
-      <td>${a.dept}</td>
-      <td>${a.criticality}/5</td>
-      <td class="num">${a.riskScore.toFixed(0)}</td>
-      <td><span class="tag ${levelTagClass(a.level)}">${a.level}</span></td>
-    </tr>`).join('');
-    closeAssetDetail();
+    if (backendAnalysisStatus === 'success' && backendAnalysis && backendAnalysis.intelligence && backendAnalysis.intelligence.assets) {
+        const assets = backendAnalysis.intelligence.assets;
+        document.getElementById('asset-table').innerHTML = assets.map(a => `
+        <tr class="click-row" onclick="openAssetDetail('${a.asset_id}')">
+          <td><b>${a.asset_name}</b></td>
+          <td>${a.asset_type}</td>
+          <td>${a.department}</td>
+          <td>${a.criticality}/5</td>
+          <td class="num">${a.risk.score.toFixed(0)}</td>
+          <td><span class="tag ${levelTagClass(a.risk.level)}">${a.risk.level}</span></td>
+        </tr>`).join('');
+        closeAssetDetail();
+        return;
+    }
+
+    if (DATA && DATA.assets) {
+        const rows = [...DATA.assets].sort((a, b) => b.riskScore - a.riskScore);
+        document.getElementById('asset-table').innerHTML = rows.map(a => `
+        <tr class="click-row" onclick="openAssetDetail('${a.id}')">
+          <td><b>${a.name}</b></td>
+          <td>${a.type}</td>
+          <td>${a.dept}</td>
+          <td>${a.criticality}/5</td>
+          <td class="num">${a.riskScore.toFixed(0)}</td>
+          <td><span class="tag ${levelTagClass(a.level)}">${a.level}</span></td>
+        </tr>`).join('');
+        closeAssetDetail();
+    }
 }
 
 function openAssetDetail(id) {
-    const a = DATA.assets.find(x => x.id === id);
-    if (!a) return;
-    document.getElementById('asset-detail').classList.add('show');
-    document.getElementById('asset-detail-body').innerHTML = `
-    <h3 style="font-size:19px;">${a.name}</h3>
-    <div class="pills">
-      <span class="pill">${a.type}</span><span class="pill">${a.dept}</span>
-      <span class="pill">Criticality ${a.criticality}/5</span>
-      <span class="tag ${levelTagClass(a.level)}">${a.level}</span>
-    </div>
-    <div class="grid grid4" style="margin-top:18px;">
-      <div><div class="label">Business value</div><div class="value" style="font-size:19px;">${fmtINR(a.businessValue)}</div></div>
-      <div><div class="label">Risk score</div><div class="value" style="font-size:19px;">${a.riskScore.toFixed(0)}/100</div></div>
-      <div><div class="label">Expected annual loss</div><div class="value" style="font-size:19px;">${fmtINR(a.expectedLoss)}</div></div>
-      <div><div class="label">Existing protection</div><div class="value" style="font-size:19px;">${Math.round(a.protection * 100)}%</div></div>
-    </div>
-    <div style="margin-top:20px;">
-      <div class="title">Top vulnerability</div>
-      ${a.topVuln ? `<p style="font-size:13.5px;">${a.topVuln.name} — severity ${a.topVuln.severity}, exploitability ${a.topVuln.exploitability}</p>` : `<p class="empty">None recorded</p>`}
-    </div>
-    <div style="margin-top:16px;">
-      <div class="title">Controls in place</div>
-      ${a.controls.length ? a.controls.map(c => `<p style="font-size:13.5px;">${c.name} — ${Math.round(c.effectiveness * 100)}% effective</p>`).join('') : `<p class="empty">No controls recorded for this asset</p>`}
-    </div>`;
+    if (backendAnalysisStatus === 'success' && backendAnalysis && backendAnalysis.intelligence && backendAnalysis.intelligence.assets) {
+        const bAssets = backendAnalysis.intelligence.assets;
+        const a = bAssets.find(x => x.asset_id === id);
+        if (a) {
+            document.getElementById('asset-detail').classList.add('show');
+            const topVuln = a.vulnerabilities.length ? [...a.vulnerabilities].sort((x, y) => y.severity - x.severity)[0] : null;
+            document.getElementById('asset-detail-body').innerHTML = `
+            <h3 style="font-size:19px;">${a.asset_name}</h3>
+            <div class="pills">
+              <span class="pill">${a.asset_type}</span><span class="pill">${a.department}</span>
+              <span class="pill">Criticality ${a.criticality}/5</span>
+              <span class="tag ${levelTagClass(a.risk.level)}">${a.risk.level}</span>
+            </div>
+            <div class="grid grid4" style="margin-top:18px;">
+              <div><div class="label">Business value</div><div class="value" style="font-size:19px;">${fmtINR(a.business_value)}</div></div>
+              <div><div class="label">Risk score</div><div class="value" style="font-size:19px;">${a.risk.score.toFixed(0)}/100</div></div>
+              <div><div class="label">Historical Loss</div><div class="value" style="font-size:19px;">${fmtINR(a.financial.historical_annualized_loss)}</div></div>
+              <div><div class="label">Existing protection</div><div class="value" style="font-size:19px;">${Math.round(a.risk.combined_control_effectiveness * 100)}%</div></div>
+            </div>
+            <div style="margin-top:20px;">
+              <div class="title">Top vulnerability</div>
+              ${topVuln ? `<p style="font-size:13.5px;">${topVuln.vulnerability_name} — severity ${topVuln.severity}, exploitability ${topVuln.exploitability} (exposure: ${topVuln.vulnerability_exposure})</p>` : `<p class="empty">None recorded</p>`}
+            </div>
+            <div style="margin-top:16px;">
+              <div class="title">Controls in place</div>
+              ${a.controls.length ? a.controls.map(c => `<p style="font-size:13.5px;">${c.control_name} — ${Math.round(c.effectiveness * 100)}% effective (${c.implementation_status})</p>`).join('') : `<p class="empty">No controls recorded for this asset</p>`}
+            </div>`;
+            return;
+        }
+    }
+
+    if (DATA && DATA.assets) {
+        const a = DATA.assets.find(x => x.id === id);
+        if (!a) return;
+        document.getElementById('asset-detail').classList.add('show');
+        document.getElementById('asset-detail-body').innerHTML = `
+        <h3 style="font-size:19px;">${a.name}</h3>
+        <div class="pills">
+          <span class="pill">${a.type}</span><span class="pill">${a.dept}</span>
+          <span class="pill">Criticality ${a.criticality}/5</span>
+          <span class="tag ${levelTagClass(a.level)}">${a.level}</span>
+        </div>
+        <div class="grid grid4" style="margin-top:18px;">
+          <div><div class="label">Business value</div><div class="value" style="font-size:19px;">${fmtINR(a.businessValue)}</div></div>
+          <div><div class="label">Risk score</div><div class="value" style="font-size:19px;">${a.riskScore.toFixed(0)}/100</div></div>
+          <div><div class="label">Expected annual loss</div><div class="value" style="font-size:19px;">${fmtINR(a.expectedLoss)}</div></div>
+          <div><div class="label">Existing protection</div><div class="value" style="font-size:19px;">${Math.round(a.protection * 100)}%</div></div>
+        </div>
+        <div style="margin-top:20px;">
+          <div class="title">Top vulnerability</div>
+          ${a.topVuln ? `<p style="font-size:13.5px;">${a.topVuln.name} — severity ${a.topVuln.severity}, exploitability ${a.topVuln.exploitability}</p>` : `<p class="empty">None recorded</p>`}
+        </div>
+        <div style="margin-top:16px;">
+          <div class="title">Controls in place</div>
+          ${a.controls.length ? a.controls.map(c => `<p style="font-size:13.5px;">${c.name} — ${Math.round(c.effectiveness * 100)}% effective</p>`).join('') : `<p class="empty">No controls recorded for this asset</p>`}
+        </div>`;
+    }
 }
 function closeAssetDetail() { document.getElementById('asset-detail').classList.remove('show'); }
 
 function renderVulns() {
-    const b = DATA.vulnBuckets;
-    const items = [
-        { label: 'Critical', value: b.CRITICAL, cls: 'tag-critical' },
-        { label: 'High', value: b.HIGH, cls: 'tag-high' },
-        { label: 'Medium', value: b.MEDIUM, cls: 'tag-medium' },
-        { label: 'Low', value: b.LOW, cls: 'tag-low' }
-    ];
-    document.getElementById('vuln-counts').innerHTML = items.map(i => `
-    <div class="card"><div class="label">${i.label}</div><div class="value">${i.value}</div></div>`).join('');
+    if (backendAnalysisStatus === 'success' && backendAnalysis && backendAnalysis.intelligence) {
+        const intel = backendAnalysis.intelligence;
+        const sum = intel.summary || {};
+        const items = [
+            { label: 'Critical', value: sum.critical_vulnerabilities || 0, cls: 'tag-critical' },
+            { label: 'High', value: sum.high_vulnerabilities || 0, cls: 'tag-high' },
+            { label: 'Medium', value: sum.medium_vulnerabilities || 0, cls: 'tag-medium' },
+            { label: 'Low', value: sum.low_vulnerabilities || 0, cls: 'tag-low' }
+        ];
+        document.getElementById('vuln-counts').innerHTML = items.map(i => `
+        <div class="card"><div class="label">${i.label}</div><div class="value">${i.value}</div></div>`).join('');
 
-    const top = [...DATA.vulns].sort((a, b) => b.severity - a.severity).slice(0, 10);
-    document.getElementById('vuln-table').innerHTML = top.map(v => {
-        const asset = DATA.assets.find(a => a.id === v.assetId);
-        return `<tr><td><b>${v.name}</b></td><td>${asset ? asset.name : v.assetId}</td><td class="num">${v.severity}</td><td class="num">${v.exploitability}</td><td>${v.status}</td></tr>`;
-    }).join('');
+        const vulns = intel.top_vulnerabilities || intel.vulnerabilities || [];
+        const top = vulns.slice(0, 10);
+        document.getElementById('vuln-table').innerHTML = top.map(v => {
+            return `<tr><td><b>${v.vulnerability_name}</b></td><td>${v.asset_name || v.asset_id}</td><td class="num">${v.severity}</td><td class="num">${v.exploitability}</td><td>${v.status}</td></tr>`;
+        }).join('');
+        return;
+    }
+
+    if (DATA && DATA.vulnBuckets) {
+        const b = DATA.vulnBuckets;
+        const items = [
+            { label: 'Critical', value: b.CRITICAL, cls: 'tag-critical' },
+            { label: 'High', value: b.HIGH, cls: 'tag-high' },
+            { label: 'Medium', value: b.MEDIUM, cls: 'tag-medium' },
+            { label: 'Low', value: b.LOW, cls: 'tag-low' }
+        ];
+        document.getElementById('vuln-counts').innerHTML = items.map(i => `
+        <div class="card"><div class="label">${i.label}</div><div class="value">${i.value}</div></div>`).join('');
+
+        const top = [...DATA.vulns].sort((a, b) => b.severity - a.severity).slice(0, 10);
+        document.getElementById('vuln-table').innerHTML = top.map(v => {
+            const asset = DATA.assets.find(a => a.id === v.assetId);
+            return `<tr><td><b>${v.name}</b></td><td>${asset ? asset.name : v.assetId}</td><td class="num">${v.severity}</td><td class="num">${v.exploitability}</td><td>${v.status}</td></tr>`;
+        }).join('');
+    }
 }
 
 function renderThreats() {
-    if (!DATA.threats.length) {
-        document.getElementById('threats').innerHTML = `<div class="empty">No incident history was provided, so threat modeling is unavailable. Upload an incidents file to see this page.</div>`;
+    if (backendAnalysisStatus === 'success' && backendAnalysis && backendAnalysis.threats) {
+        const threats = backendAnalysis.threats;
+        if (threats.status === 'no_incident_history' || !threats.scenarios || !threats.scenarios.length) {
+            document.getElementById('threats').innerHTML = `<div class="empty">No incident history was provided, so threat modeling is unavailable. Upload an incidents file to see this page.</div>`;
+            return;
+        }
+        const scenarios = threats.scenarios;
+        const max = Math.max(...scenarios.map(t => t.historical_annualized_loss || 0), 1);
+        document.getElementById('threats').innerHTML = `
+        <div class="title" style="display:flex;justify-content:space-between;align-items:center;">
+            <span>Modeled exposure by threat type</span>
+            <span style="font-size:12px;font-weight:normal;color:var(--muted);">${threats.scenario_count} Scenarios | ${threats.total_supplied_frequency_per_year.toFixed(2)} events/yr</span>
+        </div>
+        <table><thead><tr><th>Threat Scenario</th><th>Reported Freq / yr</th><th>Historical Annualized Loss</th></tr></thead><tbody>
+        ${scenarios.map(t => `
+          <tr>
+            <td><b>${t.scenario_type}</b><br><span style="font-size:11.5px;color:var(--muted);">${t.description}</span></td>
+            <td class="num">${t.total_supplied_frequency_per_year.toFixed(2)}</td>
+            <td>
+              <div class="bar-cell">
+                <div class="bar-track"><div class="bar-fill" style="width:${((t.historical_annualized_loss / max) * 100).toFixed(0)}%;background:var(--accent);"></div></div>
+                <span class="num" style="width:110px;text-align:right;">${fmtINR(t.historical_annualized_loss)}</span>
+              </div>
+            </td>
+          </tr>`).join('')}
+        </tbody></table>`;
+        renderMitre();
         return;
     }
-    const max = Math.max(...DATA.threats.map(t => t.exposure));
-    document.getElementById('threats').innerHTML = `
-    <div class="title">Modeled exposure by threat type</div>
-    <table><thead><tr><th>Threat</th><th>Frequency / yr</th><th>Modeled exposure</th></tr></thead><tbody>
-    ${DATA.threats.map(t => `
-      <tr><td><b>${t.type}</b></td><td class="num">${t.freq.toFixed(2)}</td>
-      <td>
-        <div class="bar-cell">
-          <div class="bar-track"><div class="bar-fill" style="width:${(t.exposure / max * 100).toFixed(0)}%;background:var(--accent);"></div></div>
-          <span class="num" style="width:90px;text-align:right;">${fmtINR(t.exposure)}</span>
-        </div>
-      </td></tr>`).join('')}
-    </tbody></table>`;
+
+    if (DATA) {
+        if (!DATA.threats.length) {
+            document.getElementById('threats').innerHTML = `<div class="empty">No incident history was provided, so threat modeling is unavailable. Upload an incidents file to see this page.</div>`;
+            renderMitre();
+            return;
+        }
+        const max = Math.max(...DATA.threats.map(t => t.exposure));
+        document.getElementById('threats').innerHTML = `
+        <div class="title">Modeled exposure by threat type</div>
+        <table><thead><tr><th>Threat</th><th>Frequency / yr</th><th>Modeled exposure</th></tr></thead><tbody>
+        ${DATA.threats.map(t => `
+          <tr><td><b>${t.type}</b></td><td class="num">${t.freq.toFixed(2)}</td>
+          <td>
+            <div class="bar-cell">
+              <div class="bar-track"><div class="bar-fill" style="width:${(t.exposure / max * 100).toFixed(0)}%;background:var(--accent);"></div></div>
+              <span class="num" style="width:90px;text-align:right;">${fmtINR(t.exposure)}</span>
+            </div>
+          </td></tr>`).join('')}
+        </tbody></table>`;
+        renderMitre();
+    }
+}
+
+function renderMitre() {
+    const mitreEl = document.getElementById('mitre-container');
+    if (!mitreEl) return;
+
+    if (backendAnalysisStatus === 'success' && backendAnalysis && backendAnalysis.mitre) {
+        const mitre = backendAnalysis.mitre;
+        const sum = mitre.summary || {};
+        const techniques = mitre.techniques || [];
+
+        mitreEl.innerHTML = `
+        <div class="card">
+            <div class="title" style="display:flex;justify-content:space-between;align-items:center;">
+                <span>MITRE ATT&CK Threat Mapping Summary</span>
+                <span class="tag tag-medium" style="font-size:11px;">Coverage: ${sum.mapping_coverage_percentage || 0}%</span>
+            </div>
+            <div class="grid grid4" style="margin-top:12px;margin-bottom:16px;">
+                <div><div class="label">Mapped Incidents</div><div class="value" style="font-size:18px;">${sum.mapped_incidents || 0} / ${sum.total_incidents || 0}</div></div>
+                <div><div class="label">Unmapped Incidents</div><div class="value" style="font-size:18px;">${sum.unmapped_incidents || 0}</div></div>
+                <div><div class="label">Unique Tactics</div><div class="value" style="font-size:18px;">${sum.unique_tactics || 0}</div></div>
+                <div><div class="label">Unique Techniques</div><div class="value" style="font-size:18px;">${sum.unique_techniques || 0}</div></div>
+            </div>
+
+            <div class="title" style="margin-top:16px;margin-bottom:8px;">Mapped ATT&CK Techniques</div>
+            ${techniques.length ? `
+            <table>
+                <thead>
+                    <tr>
+                        <th>Technique</th>
+                        <th>Tactic</th>
+                        <th>Incidents</th>
+                        <th>Affected Assets</th>
+                        <th>Risk Level</th>
+                        <th>Confidence & Basis</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    ${techniques.map(t => {
+                        const confTag = t.mapping_confidence === 'HIGH' ? 'tag-critical' : (t.mapping_confidence === 'MEDIUM' ? 'tag-medium' : 'tag-low');
+                        return `
+                        <tr>
+                            <td><b>[${t.technique_id}] ${t.technique_name}</b></td>
+                            <td><span class="pill" style="font-size:11px;">${t.tactic_name} (${t.tactic_id})</span></td>
+                            <td class="num">${t.incident_count}</td>
+                            <td>${t.affected_assets.join(', ') || 'None'}</td>
+                            <td><span class="tag ${levelTagClass(t.highest_asset_risk_level)}">${t.highest_asset_risk_level}</span></td>
+                            <td style="font-size:11.5px;color:var(--muted);max-width:250px;">
+                                <span class="tag ${confTag}" style="font-size:10px;padding:1px 5px;margin-right:4px;">${t.mapping_confidence}</span>
+                                ${t.mapping_basis}
+                            </td>
+                        </tr>`;
+                    }).join('')}
+                </tbody>
+            </table>` : `<div class="empty">No mapped ATT&CK techniques available for this dataset.</div>`}
+        </div>`;
+        return;
+    }
+
+    if (backendAnalysisStatus === 'error') {
+        mitreEl.innerHTML = `<div class="card"><div class="empty" style="color:var(--danger);">Unable to load MITRE ATT&CK threat mapping (backend unavailable).</div></div>`;
+        return;
+    }
+
+    mitreEl.innerHTML = `<div class="card"><div class="empty">MITRE ATT&CK threat mapping is available when running backend analysis.</div></div>`;
 }
 
 function renderFinancial() {
-    document.getElementById('financial-total').textContent = fmtINR(DATA.totalExpectedLoss);
-    const top = [...DATA.assets].sort((a, b) => b.expectedLoss - a.expectedLoss).slice(0, 8);
-    const max = Math.max(...top.map(a => a.expectedLoss), 1);
-    document.getElementById('financial-bars').innerHTML = top.map(a => `
-    <div style="margin-bottom:12px;">
-      <div style="display:flex;justify-content:space-between;font-size:12.5px;margin-bottom:5px;">
-        <span style="font-weight:600;">${a.name}</span><span class="num">${fmtINR(a.expectedLoss)}</span>
-      </div>
-      <div class="bar-track"><div class="bar-fill" style="width:${(a.expectedLoss / max * 100).toFixed(0)}%;background:${levelColor(a.level)};"></div></div>
-    </div>`).join('');
+    let lossTotal = 0;
+
+    if (
+        backendAnalysisStatus === 'success' &&
+        backendAnalysis &&
+        backendAnalysis.financial
+    ) {
+        const finSummary = backendAnalysis.financial.financial_summary || {};
+        if (finSummary.historical_annualized_loss !== undefined && finSummary.historical_annualized_loss !== null && finSummary.historical_annualized_loss > 0) {
+            lossTotal = finSummary.historical_annualized_loss;
+        } else if (finSummary.total_historical_annualized_loss !== undefined && finSummary.total_historical_annualized_loss !== null && finSummary.total_historical_annualized_loss > 0) {
+            lossTotal = finSummary.total_historical_annualized_loss;
+        } else {
+            const assets = backendAnalysis.assets || (backendAnalysis.financial ? backendAnalysis.financial.assets : []) || [];
+            const assetSum = assets.reduce((sum, a) => {
+                const aLoss = a.financial ? (a.financial.historical_annualized_loss || 0) : (a.historical_annualized_loss || 0);
+                return sum + aLoss;
+            }, 0);
+            if (assetSum > 0) {
+                lossTotal = assetSum;
+            }
+        }
+    }
+
+    if (!lossTotal && DATA && DATA.totalExpectedLoss) {
+        lossTotal = DATA.totalExpectedLoss;
+    }
+
+    document.getElementById('financial-total').textContent = fmtINR(lossTotal || 0);
+
+    if (backendAnalysisStatus === 'success' && backendAnalysis && backendAnalysis.financial) {
+        const assets = backendAnalysis.assets || [];
+        const top = [...assets].sort((a, b) => {
+            const lossA = a.financial ? a.financial.historical_annualized_loss : 0;
+            const lossB = b.financial ? b.financial.historical_annualized_loss : 0;
+            return lossB - lossA;
+        }).slice(0, 8);
+
+        const max = Math.max(...top.map(a => (a.financial ? a.financial.historical_annualized_loss : 0)), 1);
+        document.getElementById('financial-bars').innerHTML = top.map(a => {
+            const name = a.asset_name || a.name;
+            const loss = a.financial ? a.financial.historical_annualized_loss : 0;
+            const rLevel = a.risk ? a.risk.level : (a.level || 'LOW');
+            return `
+            <div style="margin-bottom:12px;">
+              <div style="display:flex;justify-content:space-between;font-size:12.5px;margin-bottom:5px;">
+                <span style="font-weight:600;">${name}</span><span class="num">${fmtINR(loss)}</span>
+              </div>
+              <div class="bar-track"><div class="bar-fill" style="width:${((loss / max) * 100).toFixed(0)}%;background:${levelColor(rLevel)};"></div></div>
+            </div>`;
+        }).join('');
+        return;
+    }
+
+    if (DATA) {
+        document.getElementById('financial-total').textContent = fmtINR(DATA.totalExpectedLoss);
+        const top = [...DATA.assets].sort((a, b) => b.expectedLoss - a.expectedLoss).slice(0, 8);
+        const max = Math.max(...top.map(a => a.expectedLoss), 1);
+        document.getElementById('financial-bars').innerHTML = top.map(a => `
+        <div style="margin-bottom:12px;">
+          <div style="display:flex;justify-content:space-between;font-size:12.5px;margin-bottom:5px;">
+            <span style="font-weight:600;">${a.name}</span><span class="num">${fmtINR(a.expectedLoss)}</span>
+          </div>
+          <div class="bar-track"><div class="bar-fill" style="width:${(a.expectedLoss / max * 100).toFixed(0)}%;background:${levelColor(a.level)};"></div></div>
+        </div>`).join('');
+    }
 }
 
 /* ---------- What-if ---------- */
+function getWhatIfBaseline() {
+    if (
+        backendAnalysisStatus === 'success' &&
+        backendAnalysis &&
+        backendAnalysis.financial &&
+        backendAnalysis.financial.financial_summary &&
+        backendAnalysis.financial.financial_summary.historical_annualized_loss !== undefined &&
+        backendAnalysis.financial.financial_summary.historical_annualized_loss !== null &&
+        backendAnalysis.financial.financial_summary.historical_annualized_loss > 0
+    ) {
+        return backendAnalysis.financial.financial_summary.historical_annualized_loss;
+    }
+    return (DATA && DATA.totalExpectedLoss) ? DATA.totalExpectedLoss : 0;
+}
+
 function renderWhatIfChecklist() {
+    simulationResult = null;
     document.getElementById('whatif-list').innerHTML = IMPROVEMENTS.map(imp => `
     <div class="check-row">
       <input type="checkbox" id="wi-${imp.id}">
       <label for="wi-${imp.id}">${imp.name}</label>
       <span class="meta">${Math.round(imp.effectiveness * 100)}% · ${fmtINR(imp.cost)}/yr</span>
     </div>`).join('');
-    document.getElementById('whatif-before').textContent = fmtINR(DATA.totalExpectedLoss);
-    document.getElementById('whatif-after').textContent = fmtINR(DATA.totalExpectedLoss);
+    const before = getWhatIfBaseline();
+    document.getElementById('whatif-before').textContent = fmtINR(before);
+    document.getElementById('whatif-after').textContent = fmtINR(before);
     document.getElementById('whatif-reduction').textContent = fmtINR(0);
+    const expEl = document.getElementById('whatif-explanation');
+    if (expEl) expEl.textContent = '';
 }
-function runWhatIf() {
+
+async function sendBackendSimulation(scenarioObj) {
+    try {
+        const src = (MODE === 'demo') ? buildDemoData() : { assets: RAW.assets, vulnerabilities: RAW.vulnerabilities, controls: RAW.controls || [], incidents: RAW.incidents || [] };
+        const formData = _buildFormData(src);
+        formData.append('scenario', JSON.stringify(scenarioObj || {}));
+
+        const response = await fetch('http://localhost:8000/api/simulate', {
+            method: 'POST',
+            body: formData
+        });
+        const result = await response.json();
+        if (response.ok && result.success) {
+            simulationResult = result;
+            console.log('Backend simulation successful:', result);
+            return result;
+        } else {
+            console.warn('Backend simulation failed:', result);
+            return null;
+        }
+    } catch (err) {
+        console.warn('Backend simulation call failed (server offline or network error):', err);
+        return null;
+    }
+}
+
+async function runWhatIf() {
     const chosen = IMPROVEMENTS.filter(imp => document.getElementById('wi-' + imp.id).checked);
-    const extraEff = chosen.reduce((m, i) => Math.max(m, i.effectiveness), 0);
-    const before = DATA.totalExpectedLoss;
-    const after = totalLossWithExtraProtection(DATA.assets, extraEff);
+    const chosenEffs = chosen.map(imp => imp.effectiveness);
+    const extraCombined = combinedEffectiveness(chosenEffs);
+    const before = getWhatIfBaseline();
+    const after = Math.max(0, before * (1 - extraCombined));
+    const reduction = Math.max(0, before - after);
+
     document.getElementById('whatif-before').textContent = fmtINR(before);
     document.getElementById('whatif-after').textContent = fmtINR(after);
-    document.getElementById('whatif-reduction').textContent = fmtINR(Math.max(0, before - after));
+    document.getElementById('whatif-reduction').textContent = fmtINR(reduction);
+
+    // Call backend simulation endpoint
+    const controlChanges = chosen.map(imp => ({
+        control_id: imp.id,
+        effectiveness: imp.effectiveness,
+        active: true
+    }));
+    const scenarioObj = {
+        asset_id: null, // Enterprise-level simulation across dataset
+        control_changes: controlChanges
+    };
+
+    const backendSim = await sendBackendSimulation(scenarioObj);
+    const expEl = document.getElementById('whatif-explanation');
+    if (expEl) {
+        if (backendSim && backendSim.explanation) {
+            expEl.textContent = backendSim.explanation;
+        } else if (chosen.length === 0) {
+            expEl.textContent = 'No scenario changes selected.';
+        } else {
+            expEl.textContent = `Simulated ${chosen.length} control improvement(s) using mathematically combined effectiveness of ${Math.round(extraCombined * 100)}%.`;
+        }
+    }
+let mcResult = null;
+
+async function sendBackendMonteCarlo(iterations = 5000, seed = 42, assetId = null) {
+    try {
+        const src = (MODE === 'demo') ? buildDemoData() : { assets: RAW.assets, vulnerabilities: RAW.vulnerabilities, controls: RAW.controls || [], incidents: RAW.incidents || [] };
+        const formData = _buildFormData(src);
+        formData.append('iterations', String(iterations));
+        formData.append('seed', String(seed));
+        if (assetId) {
+            formData.append('asset_id', String(assetId));
+        }
+
+        const response = await fetch('http://localhost:8000/api/monte-carlo', {
+            method: 'POST',
+            body: formData
+        });
+        const result = await response.json();
+        if (response.ok && result.simulation) {
+            mcResult = result;
+            console.log('Backend Monte Carlo simulation successful:', result);
+            return result;
+        } else {
+            console.warn('Backend Monte Carlo simulation failed:', result);
+            return null;
+        }
+    } catch (err) {
+        console.warn('Backend Monte Carlo call failed:', err);
+        return null;
+    }
 }
 
+async function runMonteCarloSimulation() {
+    const resEl = document.getElementById('monte-carlo-results');
+    if (!resEl) return;
 
-function runOptimizer() {
+    resEl.innerHTML = `<div class="empty">Running uncertainty simulation...</div>`;
+
+    const result = await sendBackendMonteCarlo(5000, 42);
+
+    if (result && result.simulation) {
+        renderMonteCarlo(result);
+    } else {
+        resEl.innerHTML = `<div class="empty" style="color:var(--danger);">Unable to run uncertainty simulation. Please ensure valid dataset is loaded.</div>`;
+    }
+}
+
+function renderMonteCarlo(res) {
+    const resEl = document.getElementById('monte-carlo-results');
+    if (!resEl || !res || !res.simulation) return;
+
+    const sim = res.simulation;
+    const base = res.baseline || {};
+    const dist = res.risk_level_distribution || {};
+    const band = res.uncertainty_band || 'LOW';
+
+    const bandClass = band === 'HIGH' ? 'tag-critical' : (band === 'MODERATE' ? 'tag-medium' : 'tag-low');
+
+    resEl.innerHTML = `
+    <div class="grid grid4" style="margin-bottom:16px;">
+        <div><div class="label">Baseline Score</div><div class="value" style="font-size:18px;">${base.risk_score ? base.risk_score.toFixed(2) : '—'} (${base.risk_level || '—'})</div></div>
+        <div><div class="label">Simulated Median</div><div class="value" style="font-size:18px;">${sim.median.toFixed(2)}</div></div>
+        <div><div class="label">90% Range (P5–P95)</div><div class="value" style="font-size:18px;color:var(--safe);">${sim.p5.toFixed(2)} – ${sim.p95.toFixed(2)}</div></div>
+        <div><div class="label">Uncertainty Band</div><div class="value" style="font-size:18px;"><span class="tag ${bandClass}">${band}</span></div></div>
+    </div>
+
+    <div style="display:grid;grid-template-columns:repeat(5,1fr);gap:8px;font-size:12px;margin-bottom:16px;background:var(--bg-subtle,#f8f9fa);padding:10px;border-radius:6px;">
+        <div><span>Mean:</span> <b>${sim.mean.toFixed(2)}</b></div>
+        <div><span>Std Dev:</span> <b>${sim.std_dev.toFixed(2)}</b></div>
+        <div><span>Min:</span> <b>${sim.min.toFixed(2)}</b></div>
+        <div><span>Max:</span> <b>${sim.max.toFixed(2)}</b></div>
+        <div><span>Seed / Iterations:</span> <b>${res.seed} / ${res.iterations}</b></div>
+    </div>
+
+    <div style="margin-bottom:14px;">
+        <div class="title" style="font-size:13px;margin-bottom:8px;">Risk Level Distribution across ${res.iterations} Iterations</div>
+        <div class="grid grid4">
+            ${['LOW', 'MEDIUM', 'HIGH', 'CRITICAL'].map(lvl => {
+                const item = dist[lvl] || { count: 0, percentage: 0 };
+                return `
+                <div style="background:var(--bg-card,#fff);padding:8px 12px;border:1px solid var(--border,#e5e7eb);border-radius:6px;">
+                    <div class="label" style="font-size:11px;">${lvl}</div>
+                    <div style="font-size:16px;font-weight:700;margin-top:2px;">${item.percentage}%</div>
+                    <div style="font-size:11px;color:var(--muted);">${item.count} runs</div>
+                </div>`;
+            }).join('')}
+        </div>
+    </div>
+
+    <div style="font-size:12.5px;color:var(--muted);line-height:1.5;border-top:1px solid var(--border,#e5e7eb);padding-top:10px;">
+        ${res.explanation}
+    </div>`;
+}
+
+async function sendBackendOptimization(budgetVal, candidateControlIds) {
+    try {
+        const src = (MODE === 'demo') ? buildDemoData() : { assets: RAW.assets, vulnerabilities: RAW.vulnerabilities, controls: RAW.controls || [], incidents: RAW.incidents || [] };
+        const formData = _buildFormData(src);
+        formData.append('budget', String(budgetVal));
+        if (candidateControlIds) {
+            formData.append('candidate_control_ids', JSON.stringify(candidateControlIds));
+        }
+
+        const response = await fetch('http://localhost:8000/api/optimize', {
+            method: 'POST',
+            body: formData
+        });
+        const result = await response.json();
+        if (response.ok && result.success) {
+            optimizerResult = result;
+            console.log('Backend optimization successful:', result);
+            return result;
+        } else {
+            console.warn('Backend optimization failed:', result);
+            return null;
+        }
+    } catch (err) {
+        console.warn('Backend optimization call failed (server offline or network error):', err);
+        return null;
+    }
+}
+
+async function runOptimizer() {
     const budgetRaw = document.getElementById('budget-input').value;
     const budget = num(budgetRaw, 0);
     if (budget <= 0) {
         document.getElementById('plan').innerHTML = `<div class="empty">Enter a budget greater than zero.</div>`;
         return;
     }
+
+    // Call backend optimizer endpoint
+    const backendOpt = await sendBackendOptimization(budget);
+
+    if (backendOpt && backendOpt.success && backendOpt.selected_controls) {
+        const selected = backendOpt.selected_controls;
+        if (!selected.length) {
+            document.getElementById('plan').innerHTML = `<div class="empty">${backendOpt.explanation || 'No controls fit within this budget.'}</div>`;
+            return;
+        }
+
+        const totalCost = backendOpt.budget ? backendOpt.budget.used : selected.reduce((s, i) => s + i.annual_cost, 0);
+        const remaining = backendOpt.budget ? backendOpt.budget.remaining : (budget - totalCost);
+        const riskReductionPts = backendOpt.impact ? backendOpt.impact.risk_reduction : 0;
+        const pctReduction = backendOpt.impact ? backendOpt.impact.percentage_reduction : 0;
+
+        document.getElementById('plan').innerHTML = `
+        ${selected.map((item, i) => `
+          <div class="option">
+            <div class="option-num">${i + 1}</div>
+            <div class="option-name">${item.control_name} (${item.control_id} · ${item.asset_name})</div>
+            <div class="option-value">${fmtINR(item.annual_cost)}</div>
+            <div class="option-value" style="color:var(--safe);">−${item.marginal_risk_reduction} pts</div>
+          </div>`).join('')}
+        <div class="grid grid3" style="margin-top:18px;">
+          <div><div class="label">Total investment</div><div class="value" style="font-size:19px;">${fmtINR(totalCost)}</div></div>
+          <div><div class="label">Modeled risk reduction</div><div class="value" style="font-size:19px;color:var(--safe);">${riskReductionPts} pts (${pctReduction}%)</div></div>
+          <div><div class="label">Remaining budget</div><div class="value" style="font-size:19px;">${fmtINR(remaining)}</div></div>
+        </div>
+        <div style="margin-top:14px;font-size:12.5px;color:var(--muted);line-height:1.4;">${backendOpt.explanation}</div>`;
+        return;
+    }
+
+    // Fallback: client-side simulation if server offline
     let remaining = budget;
     let selected = [];
-    let currentEff = 0;
-    let currentLoss = DATA.totalExpectedLoss;
+    let currentSelectedItems = [];
+    const baselineLoss = getWhatIfBaseline();
+    let currentLoss = baselineLoss;
     let pool = IMPROVEMENTS.slice();
 
     while (true) {
-        let best = null, bestRatio = -1, bestNewLoss = currentLoss, bestNewEff = currentEff;
+        let best = null, bestRatio = -1, bestNewLoss = currentLoss;
         pool.forEach(item => {
             if (item.cost > remaining) return;
-            const candidateEff = Math.max(currentEff, item.effectiveness);
-            const newLoss = totalLossWithExtraProtection(DATA.assets, candidateEff);
+            const candidateItems = [...currentSelectedItems, item];
+            const candidateEff = combinedEffectiveness(candidateItems.map(i => i.effectiveness));
+            const newLoss = Math.max(0, baselineLoss * (1 - candidateEff));
             const reduction = currentLoss - newLoss;
             const ratio = reduction / item.cost;
             if (reduction > 0.01 && ratio > bestRatio) {
-                bestRatio = ratio; best = item; bestNewLoss = newLoss; bestNewEff = candidateEff;
+                bestRatio = ratio; best = item; bestNewLoss = newLoss;
             }
         });
         if (!best) break;
         selected.push({ ...best, reduction: currentLoss - bestNewLoss });
+        currentSelectedItems.push(best);
         remaining -= best.cost;
         currentLoss = bestNewLoss;
-        currentEff = bestNewEff;
         pool = pool.filter(p => p.id !== best.id);
     }
 
@@ -665,7 +1242,7 @@ function runOptimizer() {
     }
 
     const totalCost = selected.reduce((s, i) => s + i.cost, 0);
-    const totalReduction = DATA.totalExpectedLoss - currentLoss;
+    const totalReduction = baselineLoss - currentLoss;
 
     document.getElementById('plan').innerHTML = `
     ${selected.map((item, i) => `
@@ -683,6 +1260,46 @@ function runOptimizer() {
 }
 
 function renderRecommendations() {
+    const recContainer = document.getElementById('recommendations');
+    if (!recContainer) return;
+
+    if (backendAnalysisStatus === 'success' && backendAnalysis && backendAnalysis.recommendations) {
+        const bRecs = backendAnalysis.recommendations;
+        if (bRecs.status === 'no_recommendations' || !bRecs.recommendations || !bRecs.recommendations.length) {
+            recContainer.innerHTML = `<div class="empty">No actionable cybersecurity recommendations generated for this dataset.</div>`;
+            return;
+        }
+
+        const items = bRecs.recommendations;
+        recContainer.innerHTML = items.map(r => {
+            const prioClass = r.priority === 'CRITICAL' ? 'p1' : (r.priority === 'HIGH' ? 'p1' : (r.priority === 'MEDIUM' ? 'p2' : 'p3'));
+            const costStr = (r.estimated_annual_cost && r.estimated_annual_cost > 0) ? fmtINR(r.estimated_annual_cost) : 'N/A (Operational / Patching)';
+            const impactDesc = r.expected_impact ? (r.expected_impact.description || 'Modeled Risk Reduction') : 'Modeled Risk Reduction';
+
+            return `
+    <div class="rec-item">
+      <div class="rec-top">
+        <div class="rec-dot ${prioClass}"></div>
+        <div class="rec-title">[${r.recommendation_id}] ${r.title}</div>
+        <span class="pill ${r.priority.toLowerCase()}" style="margin-left:auto;font-size:11px;padding:2px 8px;border-radius:4px;font-weight:600;">${r.priority}</span>
+      </div>
+      <div class="rec-body" style="margin-top:8px;font-size:13px;line-height:1.5;">
+        <div><strong>Reason:</strong> ${r.reason}</div>
+        <div style="margin-top:4px;"><strong>Recommended Action:</strong> ${r.recommended_action}</div>
+      </div>
+      <div class="rec-meta" style="margin-top:12px;display:grid;grid-template-columns:repeat(4,1fr);gap:8px;font-size:12px;">
+        <div><span>Asset</span><br><b>${r.asset_name} (${r.asset_id})</b></div>
+        <div><span>Category</span><br><b>${r.category}</b></div>
+        <div><span>Est. Annual Cost</span><br><b>${costStr}</b></div>
+        <div><span>Modeled Impact</span><br><b style="color:var(--safe);">${impactDesc}</b></div>
+      </div>
+    </div>`;
+        }).join('');
+        return;
+    }
+
+    if (!DATA || !DATA.assets) return;
+
     const top = [...DATA.assets].sort((a, b) => b.expectedLoss - a.expectedLoss).slice(0, 3);
     const items = top.map((a, i) => ({
         priority: i === 0 ? 'p1' : i === 1 ? 'p2' : 'p3',
@@ -693,7 +1310,7 @@ function renderRecommendations() {
         reduction: a.expectedLoss * 0.6
     }));
 
-    document.getElementById('recommendations').innerHTML = items.map(r => `
+    recContainer.innerHTML = items.map(r => `
     <div class="rec-item">
       <div class="rec-top"><div class="rec-dot ${r.priority}"></div><div class="rec-title">${r.title}</div></div>
       <div class="rec-body">${r.body}</div>
@@ -704,7 +1321,238 @@ function renderRecommendations() {
     </div>`).join('');
 }
 
+/* ---------- Compliance & Framework Mapping ---------- */
+function renderCompliance() {
+    const container = document.getElementById('compliance-container');
+    if (!container) return;
+
+    if (backendAnalysisStatus === 'success' && backendAnalysis && backendAnalysis.compliance) {
+        const comp = backendAnalysis.compliance;
+        const summary = comp.summary || {};
+        const frameworks = comp.frameworks || [];
+        const gaps = comp.gaps || [];
+        const crosswalk = comp.crosswalk || [];
+
+        let html = `
+        <div class="grid grid3" style="margin-bottom:20px;">
+            ${frameworks.map(fw => `
+                <div class="card" style="border-top:3px solid var(--accent, #3b82f6);">
+                    <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px;">
+                        <span style="font-weight:700;font-size:14px;">${fw.framework}</span>
+                        <span style="font-size:10px;background:var(--bg-tag,#f1f5f9);padding:2px 6px;border-radius:4px;color:var(--muted);">${fw.framework_version}</span>
+                    </div>
+                    <div class="value" style="font-size:28px;font-weight:700;color:var(--safe,#10b981);margin:6px 0;">
+                        ${fw.modeled_coverage_percentage.toFixed(1)}%
+                    </div>
+                    <div style="font-size:11px;color:var(--muted);text-transform:uppercase;letter-spacing:0.5px;margin-bottom:10px;">
+                        CRISE Modeled Coverage
+                    </div>
+                    <div style="display:flex;gap:12px;font-size:12px;border-top:1px solid var(--border,#e2e8f0);padding-top:8px;">
+                        <div><b style="color:var(--safe,#10b981);">${fw.addressed}</b> Addressed</div>
+                        <div><b style="color:#f59e0b;">${fw.partially_addressed}</b> Partial</div>
+                        <div><b style="color:#ef4444;">${fw.gaps}</b> Gaps</div>
+                    </div>
+                </div>
+            `).join('')}
+        </div>
+
+        <div class="card" style="margin-bottom:20px;">
+            <div style="font-size:12px;color:var(--muted);background:rgba(59,130,246,0.06);padding:10px 14px;border-left:3px solid #3b82f6;border-radius:4px;margin-bottom:16px;">
+                <strong>Disclaimer:</strong> ${summary.disclaimer || 'CRISE modeled coverage is an internal analytical indicator and is not a legal, regulatory, audit, certification, or conformity assessment.'}
+            </div>
+
+            <div class="title" style="margin-bottom:12px;">Security Framework Compliance Gaps (${gaps.length})</div>
+            ${gaps.length === 0 ? '<div class="empty">No compliance gaps detected in dataset.</div>' : `
+            <table>
+                <thead>
+                    <tr>
+                        <th>Priority</th>
+                        <th>Finding / Asset</th>
+                        <th>Framework</th>
+                        <th>Control ID & Name</th>
+                        <th>Status</th>
+                        <th>Recommended Action</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    ${gaps.map(g => {
+                        const prioBadge = g.priority === 'CRITICAL' ? 'critical' : (g.priority === 'HIGH' ? 'high' : (g.priority === 'MEDIUM' ? 'medium' : 'low'));
+                        const stBadge = g.status === 'GAP' ? 'critical' : 'medium';
+                        return `
+                        <tr>
+                            <td><span class="tag ${prioBadge}">${g.priority}</span></td>
+                            <td>
+                                <b>${g.title}</b><br>
+                                <span style="font-size:11px;color:var(--muted);">Asset: ${g.asset_name || g.affected_asset_id} (Risk: ${g.risk_score.toFixed(1)})</span>
+                            </td>
+                            <td><span style="font-size:12px;font-weight:600;">${g.framework}</span></td>
+                            <td>
+                                <code style="font-weight:700;font-size:11.5px;">${g.control_id}</code><br>
+                                <span style="font-size:11.5px;color:var(--muted);">${g.control_name}</span>
+                            </td>
+                            <td><span class="tag ${stBadge}">${g.status}</span></td>
+                            <td style="font-size:12px;max-width:280px;line-height:1.4;">${g.recommended_action}</td>
+                        </tr>`;
+                    }).join('')}
+                </tbody>
+            </table>
+            `}
+        </div>
+
+        <div class="card">
+            <div class="title" style="margin-bottom:12px;">Cross-Framework Finding Crosswalk</div>
+            <table>
+                <thead>
+                    <tr>
+                        <th>Finding Title</th>
+                        <th>Asset ID</th>
+                        <th>NIST CSF 2.0</th>
+                        <th>ISO/IEC 27001:2022</th>
+                        <th>CIS Controls v8</th>
+                        <th>Status</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    ${crosswalk.map(cw => `
+                        <tr>
+                            <td><b>${cw.finding_title}</b></td>
+                            <td><code>${cw.affected_asset_id}</code></td>
+                            <td style="font-size:11.5px;">
+                                <code>${cw.mappings.NIST_CSF.control_id}</code><br>
+                                <span style="color:var(--muted);">${cw.mappings.NIST_CSF.control_name}</span>
+                            </td>
+                            <td style="font-size:11.5px;">
+                                <code>${cw.mappings.ISO_27001.control_id}</code><br>
+                                <span style="color:var(--muted);">${cw.mappings.ISO_27001.control_name}</span>
+                            </td>
+                            <td style="font-size:11.5px;">
+                                <code>${cw.mappings.CIS_CONTROLS.control_id}</code><br>
+                                <span style="color:var(--muted);">${cw.mappings.CIS_CONTROLS.control_name}</span>
+                            </td>
+                            <td><span class="tag ${cw.status === 'GAP' ? 'critical' : (cw.status === 'ADDRESSED' ? 'low' : 'medium')}">${cw.status}</span></td>
+                        </tr>
+                    `).join('')}
+                </tbody>
+            </table>
+        </div>`;
+
+        container.innerHTML = html;
+        return;
+    }
+
+/* ---------- AI Security Analyst ---------- */
+let aiServiceConfigured = false;
+
+async function checkAIStatus() {
+    const badge = document.getElementById('ai-status-badge');
+    try {
+        const response = await fetch('http://localhost:8000/api/ai/status');
+        if (response.ok) {
+            const data = await response.json();
+            aiServiceConfigured = !!data.configured;
+            if (badge) {
+                if (aiServiceConfigured) {
+                    badge.innerHTML = `<span style="color:#10b981;font-weight:600;">● AI Analyst Ready (${data.model || 'Configured'})</span>`;
+                } else {
+                    badge.innerHTML = `<span style="color:#f59e0b;font-weight:600;">○ AI Analyst Not Configured</span>`;
+                }
+            }
+            return;
+        }
+    } catch (err) {
+        console.log('AI status check failed');
+    }
+    if (badge) {
+        badge.innerHTML = `<span style="color:var(--muted);">○ AI Offline</span>`;
+    }
+}
+
+function askAIWithPreset(q) {
+    const input = document.getElementById('ai-question-input');
+    if (input) input.value = q;
+    askAIAnalyst();
+}
+
+function clearAIResponse() {
+    const input = document.getElementById('ai-question-input');
+    if (input) input.value = '';
+    const container = document.getElementById('ai-response-container');
+    if (container) container.innerHTML = `<div class="empty">Ask a question or select a prompt above to view AI-powered analysis.</div>`;
+}
+
+async function askAIAnalyst() {
+    const input = document.getElementById('ai-question-input');
+    const container = document.getElementById('ai-response-container');
+    const loading = document.getElementById('ai-loading');
+    const btn = document.getElementById('ai-ask-btn');
+
+    if (!input || !container) return;
+    const question = input.value.trim();
+    if (!question) return;
+
+    loading.style.display = 'block';
+    if (btn) btn.disabled = true;
+
+    try {
+        const response = await fetch('http://localhost:8000/api/ai/analyze', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+                question: question,
+                context: backendAnalysis || {}
+            })
+        });
+
+        const data = await response.json();
+        loading.style.display = 'none';
+        if (btn) btn.disabled = false;
+
+        if (!response.ok || !data.success) {
+            const errDetail = data.detail || data.error || 'Failed to analyze query.';
+            container.innerHTML = `
+            <div style="background:rgba(239,68,68,0.06);border-left:3px solid #ef4444;padding:12px;border-radius:4px;font-size:13px;color:#ef4444;">
+                <strong>AI Security Analyst Notice:</strong> ${errDetail}
+                ${!aiServiceConfigured ? '<br><span style="font-size:12px;color:var(--muted);margin-top:6px;display:inline-block;">To configure, set <code>AI_API_KEY</code> and <code>AI_MODEL</code> in backend <code>.env</code> file and restart backend.</span>' : ''}
+            </div>`;
+            return;
+        }
+
+        const sources = data.sources || [];
+        const confidence = data.confidence || 'HIGH';
+        const confBadgeClass = confidence === 'HIGH' ? 'low' : (confidence === 'MEDIUM' ? 'medium' : 'high');
+
+        let html = `
+        <div style="background:var(--bg-card,#ffffff);border:1px solid var(--border,#e2e8f0);border-radius:8px;padding:16px;">
+            <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px;border-bottom:1px solid var(--border,#e2e8f0);padding-bottom:8px;">
+                <span style="font-weight:700;font-size:14px;color:var(--text,#1e293b);">🤖 AI Security Analyst Response</span>
+                <span class="tag ${confBadgeClass}" style="font-size:11px;">Confidence: ${confidence}</span>
+            </div>
+            
+            <div style="font-size:13.5px;line-height:1.6;color:var(--text,#334155);white-space:pre-wrap;">${data.answer}</div>
+
+            ${sources.length > 0 ? `
+            <div style="margin-top:14px;padding-top:10px;border-top:1px dashed var(--border,#e2e8f0);display:flex;align-items:center;gap:8px;flex-wrap:wrap;font-size:12px;">
+                <span style="color:var(--muted);font-weight:600;">Based on CRISE Modules:</span>
+                ${sources.map(s => `<span style="background:var(--bg-tag,#f1f5f9);padding:2px 8px;border-radius:4px;font-family:monospace;font-size:11px;color:var(--accent,#3b82f6);">${s.reference || s.type}</span>`).join('')}
+            </div>
+            ` : ''}
+        </div>`;
+
+        container.innerHTML = html;
+
+    } catch (err) {
+        loading.style.display = 'none';
+        if (btn) btn.disabled = false;
+        container.innerHTML = `
+        <div style="background:rgba(239,68,68,0.06);border-left:3px solid #ef4444;padding:12px;border-radius:4px;font-size:13px;color:#ef4444;">
+            <strong>Connection Error:</strong> Unable to connect to backend AI service.
+        </div>`;
+    }
+}
+
 /* ---------- Report ---------- */
+
+
 function buildReportText() {
     const level = riskLevel(DATA.overallRiskScore);
     const top = [...DATA.assets].sort((a, b) => b.expectedLoss - a.expectedLoss).slice(0, 5);
@@ -752,10 +1600,13 @@ async function checkBackendHealth() {
         }
         const data = await response.json();
         console.log('Backend connected:', data);
+        checkAIStatus();
     } catch (err) {
         console.log('Backend unavailable. Running frontend in local/demo mode.');
+        checkAIStatus();
     }
 }
+
 
 if (document.readyState === 'loading') {
     document.addEventListener('DOMContentLoaded', checkBackendHealth);

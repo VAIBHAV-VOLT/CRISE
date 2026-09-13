@@ -179,7 +179,13 @@
                             class="icon">✓</span>Investment optimizer</button>
                     <button class="nav-link" data-sec="recs" onclick="showSection('recs')"><span
                             class="icon">★</span>Recommendations</button>
+                    <button class="nav-link" data-sec="compliance" onclick="showSection('compliance')"><span
+                            class="icon">🛡</span>Compliance</button>
+                    <button class="nav-link" data-sec="ai-analyst" onclick="showSection('ai-analyst')"><span
+                            class="icon">🤖</span>AI Security Analyst</button>
                     <div class="nav-sep"></div>
+
+
                     <button class="nav-link" data-sec="report" onclick="showSection('report')"><span
                             class="icon">▧</span>Report</button>
                 </div>
@@ -272,11 +278,12 @@
                 <div class="page" id="sec-threats">
                     <div class="page-head">
                         <div>
-                            <h2>Threats</h2>
-                            <p class="sub">Incident types most likely to cost the organization money.</p>
+                            <h2>Threats & MITRE ATT&CK Mapping</h2>
+                            <p class="sub">Incident scenarios and deterministic MITRE ATT&CK Enterprise threat mappings.</p>
                         </div>
                     </div>
                     <div class="card" id="threats"></div>
+                    <div id="mitre-container" style="margin-top:20px;"></div>
                 </div>
 
 
@@ -284,7 +291,7 @@
                     <div class="page-head">
                         <div>
                             <h2>Financial risk</h2>
-                            <p class="sub">Expected annual loss, modeled from likelihood × impact.</p>
+                            <p class="sub">Historical annualized loss based on supplied incident frequency and loss data.</p>
                         </div>
                     </div>
                     <div class="grid grid2">
@@ -293,10 +300,9 @@
                             <div id="financial-bars"></div>
                         </div>
                         <div class="card">
-                            <div class="title">Expected annual loss</div>
+                            <div class="title">Historical Annualized Loss</div>
                             <div class="value" id="financial-total" style="font-size:32px;">—</div>
-                            <p style="color:var(--muted);font-size:12.5px;margin-top:10px;line-height:1.5;">Sum of
-                                likelihood × potential impact across all assets. A modeled estimate, not a guarantee.
+                            <p style="color:var(--muted);font-size:12.5px;margin-top:10px;line-height:1.5;">Historical annualized loss based on supplied incident frequency and loss data. A modeled estimate, not a guarantee.
                             </p>
                         </div>
                     </div>
@@ -326,6 +332,20 @@
                             </div>
                             <div class="reduction"><span>Estimated risk reduction</span><b id="whatif-reduction">—</b>
                             </div>
+                            <div id="whatif-explanation" style="margin-top:12px;font-size:12.5px;color:var(--muted);line-height:1.4;"></div>
+                        </div>
+                    </div>
+
+                    <div class="card" style="margin-top:20px;">
+                        <div class="title" style="display:flex;justify-content:space-between;align-items:center;">
+                            <span>Risk Uncertainty Analysis (Monte Carlo)</span>
+                            <button onclick="runMonteCarloSimulation()" style="font-size:12px;padding:4px 12px;">Run Uncertainty Simulation</button>
+                        </div>
+                        <p style="font-size:12.5px;color:var(--muted);margin-bottom:14px;">
+                            Estimates modeled risk variation under ±10% input uncertainty around continuous parameters (5,000 iterations).
+                        </p>
+                        <div id="monte-carlo-results">
+                            <div class="empty">Click "Run Uncertainty Simulation" to evaluate Monte Carlo risk bounds.</div>
                         </div>
                     </div>
                 </div>
@@ -361,6 +381,66 @@
                     </div>
                     <div id="recommendations"></div>
                 </div>
+
+
+                <div class="page" id="sec-compliance">
+                    <div class="page-head">
+                        <div>
+                            <h2>Compliance & Security Framework Mapping</h2>
+                            <p class="sub">Deterministic crosswalks to NIST CSF 2.0, ISO/IEC 27001:2022, and CIS Controls v8 based on CRISE platform evidence.</p>
+                        </div>
+                    </div>
+                    <div id="compliance-container"></div>
+                </div>
+
+
+                <div class="page" id="sec-ai-analyst">
+                    <div class="page-head">
+                        <div style="display:flex;justify-content:space-between;align-items:center;width:100%;">
+                            <div>
+                                <h2>AI Security Analyst</h2>
+                                <p class="sub">Natural-language cybersecurity analysis based on CRISE findings.</p>
+                            </div>
+                            <div id="ai-status-badge" style="font-size:12px;padding:4px 10px;border-radius:12px;background:var(--bg-tag,#f1f5f9);color:var(--muted);">
+                                Checking AI Status...
+                            </div>
+                        </div>
+                    </div>
+
+                    <div class="card" style="margin-bottom:20px;">
+                        <div class="title" style="margin-bottom:8px;">Suggested Questions</div>
+                        <p style="font-size:12.5px;color:var(--muted);margin-bottom:12px;">Click a sample question to query the AI Security Analyst:</p>
+                        <div style="display:flex;flex-wrap:wrap;gap:8px;" id="ai-preset-questions">
+                            <button class="file-btn" onclick="askAIWithPreset('Why is our enterprise risk rated this way?')">Why is our enterprise risk rated this way?</button>
+                            <button class="file-btn" onclick="askAIWithPreset('What should we fix first?')">What should we fix first?</button>
+                            <button class="file-btn" onclick="askAIWithPreset('What are our biggest compliance gaps?')">What are our biggest compliance gaps?</button>
+                            <button class="file-btn" onclick="askAIWithPreset('Give me an executive summary.')">Give me an executive summary.</button>
+                        </div>
+                    </div>
+
+                    <div class="card">
+                        <div class="title" style="margin-bottom:12px;">Ask the AI Security Analyst</div>
+                        <div style="display:flex;gap:10px;margin-bottom:14px;">
+                            <input type="text" id="ai-question-input" placeholder="Type your cybersecurity question (e.g., Why is asset A001 high risk?)..." style="flex:1;padding:8px 12px;font-size:13px;border:1px solid var(--border,#e2e8f0);border-radius:6px;" onkeypress="if(event.key==='Enter') askAIAnalyst()">
+                            <button id="ai-ask-btn" onclick="askAIAnalyst()" style="padding:8px 18px;font-weight:600;">Ask Analyst</button>
+                            <button onclick="clearAIResponse()" style="padding:8px 12px;background:none;border:1px solid var(--border,#e2e8f0);color:var(--muted);border-radius:6px;">Clear</button>
+                        </div>
+
+                        <div id="ai-loading" style="display:none;padding:16px;text-align:center;color:var(--muted);font-size:13px;">
+                            <span>🤖 Analyzing CRISE findings... Please wait.</span>
+                        </div>
+
+                        <div id="ai-response-container">
+                            <div class="empty">Ask a question or select a prompt above to view AI-powered analysis.</div>
+                        </div>
+
+                        <div style="margin-top:14px;font-size:11.5px;color:var(--muted);text-align:right;">
+                            <em>AI-generated analysis based on CRISE results. Verify critical security decisions against authoritative security guidance.</em>
+                        </div>
+                    </div>
+                </div>
+
+
 
 
                 <div class="page" id="sec-report">
