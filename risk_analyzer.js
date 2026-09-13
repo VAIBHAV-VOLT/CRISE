@@ -1046,6 +1046,8 @@ async function runWhatIf() {
             expEl.textContent = `Simulated ${chosen.length} control improvement(s) using mathematically combined effectiveness of ${Math.round(extraCombined * 100)}%.`;
         }
     }
+}
+
 let mcResult = null;
 
 async function sendBackendMonteCarlo(iterations = 5000, seed = 42, assetId = null) {
@@ -1439,6 +1441,9 @@ function renderCompliance() {
         container.innerHTML = html;
         return;
     }
+
+    container.innerHTML = '<div class="empty">Compliance analysis available after running backend risk assessment.</div>';
+}
 
 /* ---------- AI Security Analyst ---------- */
 let aiServiceConfigured = false;

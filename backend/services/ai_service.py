@@ -87,12 +87,28 @@ class AIService:
             with httpx.Client(timeout=30.0) as client:
                 response = client.post(endpoint_url, headers=headers, json=payload)
 
-            if response.status_code == 401 or response.status_code == 403:
-                logger.error("AI Provider Authentication Failed (HTTP %d)", response.status_code)
-                return {
-                    "error": "AI provider authentication failed. Verify AI_API_KEY in backend .env.",
-                    "status_code": 503
-                }
+            if response.status_code in (400, 401, 403):
+                err_msg = ""
+                try:
+                    res_body = response.json()
+                    if isinstance(res_body, list) and len(res_body) > 0:
+                        res_body = res_body[0]
+                    if isinstance(res_body, dict):
+                        err_msg = res_body.get("error", {}).get("message", "")
+                except Exception:
+                    pass
+
+                logger.error("AI Provider Authentication Failed (HTTP %d): %s", response.status_code, err_msg)
+                if "API key" in err_msg or response.status_code in (401, 403):
+                    return {
+                        "error": "AI provider authentication failed. Please set a valid Gemini AI_API_KEY in backend .env file.",
+                        "status_code": 503
+                    }
+                else:
+                    return {
+                        "error": f"AI provider request rejected (HTTP {response.status_code}): {err_msg or 'Invalid request'}",
+                        "status_code": 503
+                    }
             elif response.status_code == 429:
                 logger.error("AI Provider Rate Limit Exceeded (HTTP 429)")
                 return {
