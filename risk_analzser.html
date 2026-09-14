@@ -151,6 +151,7 @@
             <div class="process-track">
                 <div class="process-bar" id="process-bar"></div>
             </div>
+            <div id="analyze-error" style="display:none;margin-top:14px;color:#ef4444;font-size:13px;background:rgba(239,68,68,0.08);padding:10px 14px;border-radius:6px;border-left:3px solid #ef4444;text-align:left;"></div>
         </div>
     </div>
 
@@ -313,26 +314,65 @@
                     <div class="page-head">
                         <div>
                             <h2>What-if simulator</h2>
-                            <p class="sub">See how much expected loss drops if you add these protections.</p>
+                            <p class="sub">See how selected security controls change the organization's modeled risk and financial exposure.</p>
                         </div>
                     </div>
                     <div class="grid grid2">
                         <div class="card">
-                            <div class="title">Choose protections to simulate</div>
-                            <div class="check-list" id="whatif-list"></div>
+                            <div class="title" style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px;">
+                                <span>Choose controls to simulate</span>
+                                <span id="whatif-control-count" style="font-size:12px;color:var(--muted);font-weight:normal;"></span>
+                            </div>
+
+                            <div style="display:flex;gap:10px;margin-bottom:12px;">
+                                <select id="whatif-scope-select" onchange="onWhatIfScopeChange()" style="padding:6px 10px;border-radius:6px;border:1px solid var(--border);background:var(--bg);color:var(--text);font-size:12.5px;flex:1;">
+                                    <option value="enterprise">Entire organization (Enterprise)</option>
+                                </select>
+                                <input type="text" id="whatif-search" placeholder="Search controls..." oninput="renderWhatIfControlsList()" style="padding:6px 10px;border-radius:6px;border:1px solid var(--border);background:var(--bg);color:var(--text);font-size:12.5px;flex:1;">
+                            </div>
+
+                            <div class="check-list" id="whatif-list" style="max-height:360px;overflow-y:auto;padding-right:4px;"></div>
                             <div class="budget" style="margin-top:16px;">
-                                <button onclick="runWhatIf()" style="width:100%;">Simulate</button>
+                                <button onclick="runWhatIf()" style="width:100%;">Simulate scenario</button>
                             </div>
                         </div>
+
                         <div class="card">
                             <div class="title">Result</div>
                             <div class="compare">
-                                <div class="compare-box"><span>CURRENT</span><b id="whatif-before">—</b></div>
-                                <div class="compare-box after"><span>AFTER</span><b id="whatif-after">—</b></div>
+                                <div class="compare-box">
+                                    <span>CURRENT</span>
+                                    <div style="font-size:11.5px;color:var(--muted);margin-top:4px;">Risk Score</div>
+                                    <b id="whatif-before-score" style="font-size:22px;display:block;margin:2px 0;">—</b>
+                                    <span id="whatif-before-tag" class="tag tag-low" style="display:inline-block;margin-bottom:8px;">LOW</span>
+                                    <div style="font-size:11.5px;color:var(--muted);border-top:1px dashed var(--border);padding-top:6px;margin-top:4px;">Risk Exposure</div>
+                                    <div id="whatif-before-exp" style="font-weight:700;font-size:15px;color:var(--text);">—</div>
+                                </div>
+                                <div class="compare-box after">
+                                    <span>AFTER SELECTED CONTROLS</span>
+                                    <div style="font-size:11.5px;color:var(--muted);margin-top:4px;">Risk Score</div>
+                                    <b id="whatif-after-score" style="font-size:22px;display:block;margin:2px 0;">—</b>
+                                    <span id="whatif-after-tag" class="tag tag-low" style="display:inline-block;margin-bottom:8px;">LOW</span>
+                                    <div style="font-size:11.5px;color:var(--muted);border-top:1px dashed var(--border);padding-top:6px;margin-top:4px;">Risk Exposure</div>
+                                    <div id="whatif-after-exp" style="font-weight:700;font-size:15px;color:var(--text);">—</div>
+                                </div>
                             </div>
-                            <div class="reduction"><span>Estimated risk reduction</span><b id="whatif-reduction">—</b>
+                            <div class="reduction" style="margin-top:16px;display:flex;flex-direction:column;gap:4px;">
+                                <span>Estimated Risk Exposure Reduction</span>
+                                <div style="display:flex;align-items:baseline;gap:8px;">
+                                    <b id="whatif-reduction" style="font-size:20px;">—</b>
+                                    <span id="whatif-reduction-pct" style="font-size:13px;font-weight:700;color:var(--safe);"></span>
+                                </div>
                             </div>
                             <div id="whatif-explanation" style="margin-top:12px;font-size:12.5px;color:var(--muted);line-height:1.4;"></div>
+
+                            <div style="margin-top:20px;padding-top:14px;border-top:1px solid var(--border);">
+                                <div style="font-size:12px;font-weight:600;color:var(--muted);margin-bottom:4px;">Historical Annualized Loss</div>
+                                <div id="whatif-hist-loss" style="font-size:18px;font-weight:700;color:var(--text);">—</div>
+                                <p style="font-size:11.5px;color:var(--muted);margin-top:4px;line-height:1.4;">
+                                    Historical context only. Derived from recorded incident frequency and average loss; not directly modified by control simulation.
+                                </p>
+                            </div>
                         </div>
                     </div>
 

@@ -480,9 +480,19 @@ function startAnalysis() {
             clearInterval(timer);
             await analyzePromise;
             setTimeout(() => {
-                DATA = computeModel(src);
-                overlay.classList.remove('show');
-                launchDashboard();
+                try {
+                    DATA = computeModel(src);
+                    launchDashboard();
+                } catch (e) {
+                    console.error('[CRISE] Dashboard initialization failed:', e);
+                    const errEl = document.getElementById('analyze-error');
+                    if (errEl) {
+                        errEl.textContent = 'Dashboard failed to load: ' + e.message;
+                        errEl.style.display = 'block';
+                    }
+                } finally {
+                    overlay.classList.remove('show');
+                }
             }, 350);
         }
     }, 380);
@@ -956,35 +966,223 @@ function renderFinancial() {
 }
 
 /* ---------- What-if ---------- */
-function getWhatIfBaseline() {
-    if (
-        backendAnalysisStatus === 'success' &&
-        backendAnalysis &&
-        backendAnalysis.financial &&
-        backendAnalysis.financial.financial_summary &&
-        backendAnalysis.financial.financial_summary.historical_annualized_loss !== undefined &&
-        backendAnalysis.financial.financial_summary.historical_annualized_loss !== null &&
-        backendAnalysis.financial.financial_summary.historical_annualized_loss > 0
-    ) {
-        return backendAnalysis.financial.financial_summary.historical_annualized_loss;
+let whatIfControls = [];
+let selectedWhatIfScope = 'enterprise';
+
+function getWhatIfControlsFromDataset() {
+    let list = [];
+    if (backendAnalysisStatus === 'success' && backendAnalysis) {
+        if (backendAnalysis.intelligence && backendAnalysis.intelligence.controls && backendAnalysis.intelligence.controls.length) {
+            list = backendAnalysis.intelligence.controls.map(c => ({
+                control_id: c.control_id,
+                control_name: c.control_name,
+                asset_id: c.asset_id,
+                asset_name: c.asset_name || c.asset_id,
+                effectiveness: Number(c.effectiveness) || 0,
+                implementation_status: c.implementation_status || c.status || 'Inactive',
+                annual_cost: Number(c.annual_cost) || 0
+            }));
+        } else if (backendAnalysis.assets) {
+            backendAnalysis.assets.forEach(a => {
+                const aname = a.asset_name || a.name || a.asset_id;
+                (a.controls || []).forEach(c => {
+                    list.push({
+                        control_id: c.control_id,
+                        control_name: c.control_name,
+                        asset_id: a.asset_id,
+                        asset_name: aname,
+                        effectiveness: Number(c.effectiveness) || 0,
+                        implementation_status: c.implementation_status || c.status || 'Inactive',
+                        annual_cost: Number(c.annual_cost) || 0
+                    });
+                });
+            });
+        }
     }
-    return (DATA && DATA.totalExpectedLoss) ? DATA.totalExpectedLoss : 0;
+
+    if (!list.length && DATA && DATA.assets) {
+        DATA.assets.forEach(a => {
+            (a.controls || []).forEach(c => {
+                list.push({
+                    control_id: c.id || c.control_id,
+                    control_name: c.name || c.control_name,
+                    asset_id: a.id,
+                    asset_name: a.name,
+                    effectiveness: c.effectiveness || 0,
+                    implementation_status: c.status || 'Inactive',
+                    annual_cost: c.annual_cost || c.cost || 0
+                });
+            });
+        });
+    }
+
+    return list;
+}
+
+function getWhatIfScopeBaseline(scopeAssetId = null) {
+    if (backendAnalysisStatus === 'success' && backendAnalysis) {
+        const assets = backendAnalysis.assets || [];
+        const finSum = (backendAnalysis.financial ? backendAnalysis.financial.financial_summary : {}) || {};
+        const ov = backendAnalysis.overall_risk || {};
+
+        if (!scopeAssetId || scopeAssetId === 'enterprise') {
+            const score = ov.score !== undefined ? ov.score : 0;
+            const level = ov.level || riskLevel(score);
+            let exp = 0;
+            assets.forEach(a => {
+                const bv = a.business_value || 0;
+                const rScore = a.risk ? a.risk.score : 0;
+                exp += bv * (rScore / 100);
+            });
+            const histLoss = finSum.historical_annualized_loss || finSum.total_historical_annualized_loss || 0;
+            return { riskScore: score, riskLevel: level, riskExposure: exp, historicalLoss: histLoss };
+        } else {
+            const a = assets.find(x => x.asset_id === scopeAssetId);
+            if (a) {
+                const score = a.risk ? a.risk.score : 0;
+                const level = a.risk ? a.risk.level : riskLevel(score);
+                const bv = a.business_value || 0;
+                const exp = bv * (score / 100);
+                const histLoss = a.financial ? (a.financial.historical_annualized_loss || 0) : 0;
+                return { riskScore: score, riskLevel: level, riskExposure: exp, historicalLoss: histLoss };
+            }
+        }
+    }
+
+    if (DATA && DATA.assets) {
+        if (!scopeAssetId || scopeAssetId === 'enterprise') {
+            let exp = 0;
+            DATA.assets.forEach(a => { exp += (a.businessValue || 0) * (a.riskScore / 100); });
+            return { riskScore: DATA.overallRisk || 0, riskLevel: riskLevel(DATA.overallRisk || 0), riskExposure: exp, historicalLoss: DATA.totalExpectedLoss || 0 };
+        } else {
+            const a = DATA.assets.find(x => x.id === scopeAssetId);
+            if (a) {
+                const exp = (a.businessValue || 0) * (a.riskScore / 100);
+                return { riskScore: a.riskScore, riskLevel: a.level, riskExposure: exp, historicalLoss: a.expectedLoss || 0 };
+            }
+        }
+    }
+
+    return { riskScore: 0, riskLevel: 'LOW', riskExposure: 0, historicalLoss: 0 };
 }
 
 function renderWhatIfChecklist() {
     simulationResult = null;
-    document.getElementById('whatif-list').innerHTML = IMPROVEMENTS.map(imp => `
-    <div class="check-row">
-      <input type="checkbox" id="wi-${imp.id}">
-      <label for="wi-${imp.id}">${imp.name}</label>
-      <span class="meta">${Math.round(imp.effectiveness * 100)}% · ${fmtINR(imp.cost)}/yr</span>
-    </div>`).join('');
-    const before = getWhatIfBaseline();
-    document.getElementById('whatif-before').textContent = fmtINR(before);
-    document.getElementById('whatif-after').textContent = fmtINR(before);
-    document.getElementById('whatif-reduction').textContent = fmtINR(0);
+    whatIfControls = getWhatIfControlsFromDataset();
+
+    const scopeSel = document.getElementById('whatif-scope-select');
+    if (scopeSel) {
+        let opts = `<option value="enterprise">Entire organization (Enterprise)</option>`;
+        const assetList = (backendAnalysisStatus === 'success' && backendAnalysis && backendAnalysis.assets) ? backendAnalysis.assets : (DATA ? DATA.assets : []);
+        assetList.forEach(a => {
+            const aid = a.asset_id || a.id;
+            const aname = a.asset_name || a.name || aid;
+            opts += `<option value="${aid}">${aname} (${aid})</option>`;
+        });
+        scopeSel.innerHTML = opts;
+        scopeSel.value = 'enterprise';
+        selectedWhatIfScope = 'enterprise';
+    }
+
+    const searchInp = document.getElementById('whatif-search');
+    if (searchInp) searchInp.value = '';
+
+    renderWhatIfControlsList();
+    updateWhatIfBaselineUI();
+}
+
+function onWhatIfScopeChange() {
+    const scopeSel = document.getElementById('whatif-scope-select');
+    selectedWhatIfScope = scopeSel ? scopeSel.value : 'enterprise';
+    renderWhatIfControlsList();
+    updateWhatIfBaselineUI();
+}
+
+function updateWhatIfBaselineUI() {
+    const scopeAssetId = (selectedWhatIfScope === 'enterprise') ? null : selectedWhatIfScope;
+    const base = getWhatIfScopeBaseline(scopeAssetId);
+
+    const bScoreEl = document.getElementById('whatif-before-score');
+    const bTagEl = document.getElementById('whatif-before-tag');
+    const bExpEl = document.getElementById('whatif-before-exp');
+    const aScoreEl = document.getElementById('whatif-after-score');
+    const aTagEl = document.getElementById('whatif-after-tag');
+    const aExpEl = document.getElementById('whatif-after-exp');
+    const redEl = document.getElementById('whatif-reduction');
+    const redPctEl = document.getElementById('whatif-reduction-pct');
+    const histEl = document.getElementById('whatif-hist-loss');
     const expEl = document.getElementById('whatif-explanation');
-    if (expEl) expEl.textContent = '';
+
+    if (bScoreEl) bScoreEl.textContent = base.riskScore.toFixed(0) + ' / 100';
+    if (bTagEl) {
+        bTagEl.textContent = base.riskLevel;
+        bTagEl.className = 'tag ' + levelTagClass(base.riskLevel);
+    }
+    if (bExpEl) bExpEl.textContent = fmtINR(base.riskExposure);
+
+    if (aScoreEl) aScoreEl.textContent = base.riskScore.toFixed(0) + ' / 100';
+    if (aTagEl) {
+        aTagEl.textContent = base.riskLevel;
+        aTagEl.className = 'tag ' + levelTagClass(base.riskLevel);
+    }
+    if (aExpEl) aExpEl.textContent = fmtINR(base.riskExposure);
+
+    if (redEl) redEl.textContent = fmtINR(0);
+    if (redPctEl) redPctEl.textContent = '';
+    if (histEl) histEl.textContent = fmtINR(base.historicalLoss);
+    if (expEl) expEl.textContent = 'Select controls and click "Simulate scenario" to evaluate risk exposure reduction.';
+}
+
+function renderWhatIfControlsList() {
+    const listEl = document.getElementById('whatif-list');
+    const countEl = document.getElementById('whatif-control-count');
+    const searchVal = (document.getElementById('whatif-search') ? document.getElementById('whatif-search').value : '').toLowerCase().trim();
+
+    const scopeAssetId = (selectedWhatIfScope === 'enterprise') ? null : selectedWhatIfScope;
+
+    let filtered = whatIfControls.filter(c => {
+        if (scopeAssetId && c.asset_id !== scopeAssetId) return false;
+        if (searchVal) {
+            const matchesName = (c.control_name || '').toLowerCase().includes(searchVal);
+            const matchesId = (c.control_id || '').toLowerCase().includes(searchVal);
+            const matchesAsset = (c.asset_name || c.asset_id || '').toLowerCase().includes(searchVal);
+            if (!matchesName && !matchesId && !matchesAsset) return false;
+        }
+        return true;
+    });
+
+    if (countEl) {
+        countEl.textContent = `Showing ${filtered.length} of ${whatIfControls.length} controls`;
+    }
+
+    if (!filtered.length) {
+        if (listEl) listEl.innerHTML = `<div class="empty" style="padding:20px 0;">No matching controls found in controls.csv for this selection.</div>`;
+        return;
+    }
+
+    if (listEl) {
+        listEl.innerHTML = filtered.map(c => {
+            const isActive = (c.implementation_status || c.status || '').toLowerCase() === 'active';
+            const effPct = Math.round((c.effectiveness || 0) * 100);
+            const costStr = fmtINR(c.annual_cost || 0) + '/yr';
+            const statusLabel = isActive ? 'Already Active' : (c.implementation_status || 'Planned');
+            const statusClass = isActive ? 'tag-safe' : 'tag-medium';
+
+            return `
+            <div class="check-row" style="display:flex;align-items:center;padding:9px 0;border-bottom:1px solid var(--border);">
+                <input type="checkbox" id="wi-${c.control_id}" data-cid="${c.control_id}" data-active="${isActive ? 'true' : 'false'}" style="margin-right:10px;cursor:pointer;">
+                <label for="wi-${c.control_id}" style="cursor:pointer;flex:1;margin-bottom:0;">
+                    <div style="font-weight:600;font-size:13px;color:var(--text);">${c.control_name}</div>
+                    <div style="font-size:11.5px;color:var(--muted);">Asset: ${c.asset_name || c.asset_id}</div>
+                </label>
+                <div style="text-align:right;font-size:11.5px;min-width:120px;line-height:1.4;">
+                    <div style="font-weight:600;color:var(--text);">${effPct}% effective</div>
+                    <div style="color:var(--muted);">${costStr}</div>
+                    <span class="tag ${statusClass}" style="font-size:10px;padding:1px 6px;display:inline-block;margin-top:2px;">${statusLabel}</span>
+                </div>
+            </div>`;
+        }).join('');
+    }
 }
 
 async function sendBackendSimulation(scenarioObj) {
@@ -1013,38 +1211,92 @@ async function sendBackendSimulation(scenarioObj) {
 }
 
 async function runWhatIf() {
-    const chosen = IMPROVEMENTS.filter(imp => document.getElementById('wi-' + imp.id).checked);
-    const chosenEffs = chosen.map(imp => imp.effectiveness);
-    const extraCombined = combinedEffectiveness(chosenEffs);
-    const before = getWhatIfBaseline();
-    const after = Math.max(0, before * (1 - extraCombined));
-    const reduction = Math.max(0, before - after);
+    const listEl = document.getElementById('whatif-list');
+    const checkedBoxes = listEl ? Array.from(listEl.querySelectorAll('input[type="checkbox"]:checked')) : [];
+    const selectedCids = checkedBoxes.map(b => b.dataset.cid);
 
-    document.getElementById('whatif-before').textContent = fmtINR(before);
-    document.getElementById('whatif-after').textContent = fmtINR(after);
-    document.getElementById('whatif-reduction').textContent = fmtINR(reduction);
+    const scopeAssetId = (selectedWhatIfScope === 'enterprise') ? null : selectedWhatIfScope;
+    const base = getWhatIfScopeBaseline(scopeAssetId);
 
-    // Call backend simulation endpoint
-    const controlChanges = chosen.map(imp => ({
-        control_id: imp.id,
-        effectiveness: imp.effectiveness,
+    const controlChanges = selectedCids.map(cid => ({
+        control_id: cid,
         active: true
     }));
+
     const scenarioObj = {
-        asset_id: null, // Enterprise-level simulation across dataset
+        asset_id: scopeAssetId,
         control_changes: controlChanges
     };
 
     const backendSim = await sendBackendSimulation(scenarioObj);
+
+    const bScoreEl = document.getElementById('whatif-before-score');
+    const bTagEl = document.getElementById('whatif-before-tag');
+    const bExpEl = document.getElementById('whatif-before-exp');
+    const aScoreEl = document.getElementById('whatif-after-score');
+    const aTagEl = document.getElementById('whatif-after-tag');
+    const aExpEl = document.getElementById('whatif-after-exp');
+    const redEl = document.getElementById('whatif-reduction');
+    const redPctEl = document.getElementById('whatif-reduction-pct');
+    const histEl = document.getElementById('whatif-hist-loss');
     const expEl = document.getElementById('whatif-explanation');
-    if (expEl) {
-        if (backendSim && backendSim.explanation) {
-            expEl.textContent = backendSim.explanation;
-        } else if (chosen.length === 0) {
-            expEl.textContent = 'No scenario changes selected.';
-        } else {
-            expEl.textContent = `Simulated ${chosen.length} control improvement(s) using mathematically combined effectiveness of ${Math.round(extraCombined * 100)}%.`;
+
+    if (backendSim && backendSim.success) {
+        const b = backendSim.baseline;
+        const s = backendSim.scenario;
+        const d = backendSim.delta;
+
+        if (bScoreEl) bScoreEl.textContent = b.risk_score.toFixed(0) + ' / 100';
+        if (bTagEl) {
+            bTagEl.textContent = b.risk_level;
+            bTagEl.className = 'tag ' + levelTagClass(b.risk_level);
         }
+        if (bExpEl) bExpEl.textContent = fmtINR(b.risk_exposure || 0);
+
+        if (aScoreEl) aScoreEl.textContent = s.risk_score.toFixed(0) + ' / 100';
+        if (aTagEl) {
+            aTagEl.textContent = s.risk_level;
+            aTagEl.className = 'tag ' + levelTagClass(s.risk_level);
+        }
+        if (aExpEl) aExpEl.textContent = fmtINR(s.risk_exposure || 0);
+
+        const expRed = d.risk_exposure_reduction !== undefined ? d.risk_exposure_reduction : (b.risk_exposure - s.risk_exposure);
+        const expRedPct = d.risk_exposure_reduction_percent !== undefined ? d.risk_exposure_reduction_percent : (b.risk_exposure > 0 ? (expRed / b.risk_exposure) * 100 : 0);
+
+        if (redEl) redEl.textContent = fmtINR(Math.max(0, expRed || 0));
+        if (redPctEl) redPctEl.textContent = expRedPct > 0 ? `(${expRedPct.toFixed(1)}% reduction)` : '(0% reduction)';
+
+        if (histEl) histEl.textContent = fmtINR(b.historical_annualized_loss || base.historicalLoss);
+        if (expEl) expEl.textContent = backendSim.explanation;
+    } else {
+        // Local fallback calculation if backend unavailable
+        if (!selectedCids.length) {
+            updateWhatIfBaselineUI();
+            if (expEl) expEl.textContent = 'No scenario changes selected.';
+            return;
+        }
+
+        const selectedCtrlObjs = whatIfControls.filter(c => selectedCids.includes(c.control_id));
+        const effs = selectedCtrlObjs.map(c => c.effectiveness);
+        const extraCombined = combinedEffectiveness(effs);
+
+        const newScore = Math.max(0, base.riskScore * (1 - extraCombined));
+        const newLevel = riskLevel(newScore);
+        const newExp = Math.max(0, base.riskExposure * (1 - extraCombined));
+        const expRed = Math.max(0, base.riskExposure - newExp);
+        const expRedPct = base.riskExposure > 0 ? (expRed / base.riskExposure) * 100 : 0;
+
+        if (aScoreEl) aScoreEl.textContent = newScore.toFixed(0) + ' / 100';
+        if (aTagEl) {
+            aTagEl.textContent = newLevel;
+            aTagEl.className = 'tag ' + levelTagClass(newLevel);
+        }
+        if (aExpEl) aExpEl.textContent = fmtINR(newExp);
+        if (redEl) redEl.textContent = fmtINR(expRed);
+        if (redPctEl) redPctEl.textContent = `(${expRedPct.toFixed(1)}% reduction)`;
+        if (histEl) histEl.textContent = fmtINR(base.historicalLoss);
+
+        if (expEl) expEl.textContent = `Simulated ${selectedCids.length} control(s) with combined effectiveness of ${Math.round(extraCombined * 100)}%. Risk score drops from ${base.riskScore.toFixed(0)} to ${newScore.toFixed(0)}.`;
     }
 }
 

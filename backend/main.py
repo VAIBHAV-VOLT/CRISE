@@ -31,17 +31,29 @@ class BaselineSummaryModel(BaseModel):
     asset_name: str = Field("Enterprise", description="Asset name or Enterprise")
     risk_score: float = Field(..., description="Baseline modeled risk score (0-100)")
     risk_level: str = Field(..., description="Baseline risk level (LOW, MEDIUM, HIGH, CRITICAL)")
+    risk_exposure: Optional[float] = Field(None, description="Baseline risk-based business exposure in INR")
+    historical_annualized_loss: Optional[float] = Field(None, description="Contextual historical annualized loss in INR")
 
 class ScenarioSummaryModel(BaseModel):
     asset_id: Optional[str] = Field(None, description="Asset ID or null for enterprise level")
     asset_name: str = Field("Enterprise", description="Asset name or Enterprise")
     risk_score: float = Field(..., description="Scenario modeled risk score (0-100)")
     risk_level: str = Field(..., description="Scenario risk level (LOW, MEDIUM, HIGH, CRITICAL)")
+    risk_exposure: Optional[float] = Field(None, description="Scenario risk-based business exposure in INR")
+    historical_annualized_loss: Optional[float] = Field(None, description="Contextual historical annualized loss in INR")
 
 class DeltaSummaryModel(BaseModel):
     risk_score_change: float = Field(..., description="Scenario score minus baseline score")
     risk_reduction: float = Field(..., description="Baseline score minus scenario score")
     percentage_change: float = Field(..., description="Percentage change in risk score")
+    risk_exposure_delta: Optional[float] = Field(None, description="Reduction in risk-based business exposure")
+    risk_exposure_reduction: Optional[float] = Field(None, description="Reduction in risk-based business exposure")
+    risk_exposure_reduction_percent: Optional[float] = Field(None, description="Percentage reduction in risk-based business exposure")
+
+class ImpactSummaryModelSim(BaseModel):
+    risk_score_delta: float = Field(..., description="Change in risk score")
+    risk_exposure_delta: float = Field(..., description="Change in risk-based business exposure")
+    risk_exposure_reduction_percent: float = Field(..., description="Percentage reduction in risk exposure")
 
 class AppliedChangesModel(BaseModel):
     controls: List[Dict[str, Any]] = Field([], description="Applied control changes")
@@ -53,6 +65,8 @@ class SimulationResponseModel(BaseModel):
     baseline: BaselineSummaryModel
     scenario: ScenarioSummaryModel
     delta: DeltaSummaryModel
+    impact: Optional[ImpactSummaryModelSim] = None
+    selected_controls: Optional[List[Dict[str, Any]]] = Field([], description="Details of selected controls")
     changes_applied: AppliedChangesModel
     explanation: str = Field(..., description="Deterministic impact explanation")
 

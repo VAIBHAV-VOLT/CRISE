@@ -228,7 +228,7 @@ def simulate_scenario(
       2. Calculate baseline risk using Phase 4 formulas.
       3. Deep-copy data and apply scenario modifications.
       4. Recalculate scenario risk using Phase 4 formulas.
-      5. Compute delta metrics and impact explanation.
+      5. Compute risk exposure, delta metrics, selected controls, and impact explanation.
       6. Return clean structured result.
     """
     # 1. Validation
@@ -242,21 +242,57 @@ def simulate_scenario(
     asset_id = scenario_input.get("asset_id")
     target_aid = str(asset_id).strip() if asset_id is not None and str(asset_id).strip() != "" else None
 
+    # Helper: compute historical annualized loss for an asset profile
+    def _calc_asset_hist_loss(ap: Dict[str, Any]) -> float:
+        tot = 0.0
+        for inc in ap.get("incidents", []):
+            freq = float(inc.get("frequency_per_year", 0.0))
+            loss = float(inc.get("average_loss", 0.0))
+            tot += freq * loss
+        return round(tot, 2)
+
+    # Build control lookup map for selected_controls metadata
+    control_lookup: Dict[str, Dict[str, Any]] = {}
+    for ap in processed_data.get("assets", []):
+        aid = ap.get("asset_id", "")
+        aname = ap.get("asset", {}).get("asset_name", aid)
+        for ctrl in ap.get("controls", []):
+            cid = ctrl.get("control_id")
+            if cid:
+                control_lookup[cid] = {
+                    "control_id": cid,
+                    "control_name": ctrl.get("control_name", cid),
+                    "asset_id": aid,
+                    "asset_name": aname,
+                    "effectiveness": float(ctrl.get("effectiveness", 0.0)),
+                    "annual_cost": float(ctrl.get("annual_cost", 0.0)),
+                    "original_status": ctrl.get("implementation_status", "Inactive"),
+                }
+
     # 2. Baseline Calculation
     baseline_full_result = calculate_risk(processed_data)
+    baseline_assets = baseline_full_result.get("assets", [])
 
     if target_aid is not None:
         # Asset-level baseline
-        asset_baselines = {a["asset_id"]: a for a in baseline_full_result.get("assets", [])}
+        asset_baselines = {a["asset_id"]: a for a in baseline_assets}
         target_base = asset_baselines.get(target_aid, {})
         base_score = target_base.get("risk", {}).get("score", 0.0)
         base_level = target_base.get("risk", {}).get("level", get_risk_level(base_score))
         asset_name = target_base.get("asset_name", target_aid)
+        bv = float(target_base.get("business_value", 0.0))
+        base_exposure = round(bv * base_score / 100.0, 2)
+
+        proc_ap = next((ap for ap in processed_data.get("assets", []) if ap.get("asset_id") == target_aid), {})
+        base_hist_loss = _calc_asset_hist_loss(proc_ap)
+
         baseline_summary = {
             "asset_id": target_aid,
             "asset_name": asset_name,
             "risk_score": base_score,
             "risk_level": base_level,
+            "risk_exposure": base_exposure,
+            "historical_annualized_loss": base_hist_loss,
         }
     else:
         # Enterprise-level baseline
@@ -264,11 +300,16 @@ def simulate_scenario(
         base_score = ov.get("score", 0.0)
         base_level = ov.get("level", get_risk_level(base_score))
         asset_name = "Enterprise"
+        base_exposure = round(sum(float(a.get("business_value", 0.0)) * float(a.get("risk", {}).get("score", 0.0)) / 100.0 for a in baseline_assets), 2)
+        base_hist_loss = round(sum(_calc_asset_hist_loss(ap) for ap in processed_data.get("assets", [])), 2)
+
         baseline_summary = {
             "asset_id": None,
             "asset_name": "Enterprise",
             "risk_score": base_score,
             "risk_level": base_level,
+            "risk_exposure": base_exposure,
+            "historical_annualized_loss": base_hist_loss,
         }
 
     # 3. Apply modifications to deep copy
@@ -276,30 +317,40 @@ def simulate_scenario(
 
     # 4. Scenario Calculation (Reusing Phase 4 risk engine)
     scenario_full_result = calculate_risk(scenario_data)
+    scenario_assets = scenario_full_result.get("assets", [])
 
     if target_aid is not None:
-        asset_scenarios = {a["asset_id"]: a for a in scenario_full_result.get("assets", [])}
+        asset_scenarios = {a["asset_id"]: a for a in scenario_assets}
         target_scen = asset_scenarios.get(target_aid, {})
         scen_score = target_scen.get("risk", {}).get("score", 0.0)
         scen_level = target_scen.get("risk", {}).get("level", get_risk_level(scen_score))
+        bv = float(target_scen.get("business_value", 0.0))
+        scen_exposure = round(bv * scen_score / 100.0, 2)
+
         scenario_summary = {
             "asset_id": target_aid,
             "asset_name": asset_name,
             "risk_score": scen_score,
             "risk_level": scen_level,
+            "risk_exposure": scen_exposure,
+            "historical_annualized_loss": base_hist_loss,
         }
     else:
         ov_scen = scenario_full_result.get("overall_risk", {})
         scen_score = ov_scen.get("score", 0.0)
         scen_level = ov_scen.get("level", get_risk_level(scen_score))
+        scen_exposure = round(sum(float(a.get("business_value", 0.0)) * float(a.get("risk", {}).get("score", 0.0)) / 100.0 for a in scenario_assets), 2)
+
         scenario_summary = {
             "asset_id": None,
             "asset_name": "Enterprise",
             "risk_score": scen_score,
             "risk_level": scen_level,
+            "risk_exposure": scen_exposure,
+            "historical_annualized_loss": base_hist_loss,
         }
 
-    # 5. Delta Calculations
+    # 5. Delta & Impact Calculations
     risk_score_change = round(scen_score - base_score, 2)
     risk_reduction = round(-risk_score_change, 2)
 
@@ -308,13 +359,41 @@ def simulate_scenario(
     else:
         percentage_change = 0.0
 
+    risk_exposure_delta = round(base_exposure - scen_exposure, 2)
+    risk_exposure_reduction = risk_exposure_delta
+    if base_exposure > 0.0:
+        risk_exposure_reduction_percent = round((risk_exposure_delta / base_exposure) * 100.0, 2)
+    else:
+        risk_exposure_reduction_percent = 0.0
+
     delta_summary = {
         "risk_score_change": risk_score_change,
         "risk_reduction": risk_reduction,
         "percentage_change": percentage_change,
+        "risk_exposure_delta": risk_exposure_delta,
+        "risk_exposure_reduction": risk_exposure_reduction,
+        "risk_exposure_reduction_percent": risk_exposure_reduction_percent,
     }
 
-    # 6. Explanation
+    impact_summary = {
+        "risk_score_delta": risk_score_change,
+        "risk_exposure_delta": risk_exposure_delta,
+        "risk_exposure_reduction_percent": risk_exposure_reduction_percent,
+    }
+
+    # 6. Build selected_controls metadata list
+    selected_controls: List[Dict[str, Any]] = []
+    for ctrl_info in applied_changes.get("controls", []):
+        cid = ctrl_info.get("control_id")
+        if cid and cid in control_lookup:
+            item = dict(control_lookup[cid])
+            if "effectiveness" in ctrl_info:
+                item["simulated_effectiveness"] = float(ctrl_info["effectiveness"])
+            if "status" in ctrl_info:
+                item["simulated_status"] = ctrl_info["status"]
+            selected_controls.append(item)
+
+    # 7. Explanation
     explanation = generate_impact_explanation(
         baseline_score=base_score,
         scenario_score=scen_score,
@@ -329,6 +408,8 @@ def simulate_scenario(
         "baseline": baseline_summary,
         "scenario": scenario_summary,
         "delta": delta_summary,
+        "impact": impact_summary,
+        "selected_controls": selected_controls,
         "changes_applied": applied_changes,
         "explanation": explanation,
     }
